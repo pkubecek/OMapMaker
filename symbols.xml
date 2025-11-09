@@ -1,61 +1,64 @@
 <root>
     <symbol id="kupka" type="point">
-        <path d="M 2 0 A 2 2 0 0 2 -2 0 A 2 2 0 0 2 2 0 Z" />
+        <path d="M 4 0 A 4 4 0 0 4 -4 0 A 4 4 0 0 4 4 0 Z" />
         <style facecolor="sienna" edgecolor="none" linewidth="0" />
     </symbol>
 
     <symbol id="prohluben" type="point">
-        <path d="M -2 0 A 2 2 0 0 2 2 0" />
-        <style facecolor="none" edgecolor="sienna" linewidth="0.25" />
+        <path d="M -4 0 A 4 4 0 0 4 4 0" />
+        <style facecolor="none" edgecolor="sienna" linewidth="0.6" />
     </symbol>
-
     <symbol id="vrstevnice_major" type="line">
-        <style color="saddlebrown" linewidth="0.51" linestyle="solid" />
+        <style color="saddlebrown" linewidth="0.8" linestyle="solid" />
     </symbol>
     <symbol id="vrstevnice_base" type="line">
-        <style color="sienna" linewidth="0.34" linestyle="solid" />
+        <style color="sienna" linewidth="0.55" linestyle="solid" />
     </symbol>
     <symbol id="vrstevnice_doplnk" type="line">
-        <style color="sienna" linewidth="0.28" linestyle="(0, (5, 2))" />
+        <style color="sienna" linewidth="0.3" linestyle="(0, (3, 1))" />
     </symbol>
-
     <symbol id="osm_road_major" type="area">
         <style facecolor="#d19c6b" edgecolor="#000000" linewidth="0.3" />
     </symbol>
     <symbol id="osm_road_secondary" type="line">
-        <style color="#000000" linewidth="1" linestyle="solid" />
+        <style color="#000000ff" linewidth="1" />
     </symbol>
     <symbol id="osm_road_track" type="line">
-        <style color="#000000" linewidth="0.60" linestyle="(0, (7, 2))" />
+        <style color="#000000" linewidth="0.8" linestyle="(0, (7, 1.5))" />
     </symbol>
     <symbol id="osm_road_path" type="line">
-        <style color="#000000" linewidth="0.50" linestyle="(0, (5, 2))" />
+        <style color="#000000" linewidth="0.6" linestyle="(0, (5, 1.5))" />
     </symbol>
         <symbol id="narrow_ride" type="line">
-        <style color="#000000" linewidth="0.30" linestyle="(0, (8, 2))" />
+        <style color="#000000" linewidth="0.4" linestyle="(0, (15, 1.5))"  />
     </symbol>
     <symbol id="osm_railway_main" type="line">
-        <style color="black" linewidth="0.7" /> 
+        <style color="black" linewidth="2" /> 
     </symbol>
     <symbol id="osm_railway_detail" type="line">
-        <style color="white" linewidth="0.6" linestyle="(0, (3, 3))" />
+        <style color="white" linewidth="1.4" linestyle="(0, (3, 3))" />
     </symbol>
     <symbol id="osm_building" type="area">
         <style facecolor="#000000" edgecolor="#000000" linewidth="0.35" />
     </symbol>
-
     <symbol id="osm_water_line" type="line">
-        <style color="#28defc" linewidth="0.34" />
+        <style color="#28defc" linewidth="0.5" />
     </symbol>
     <symbol id="osm_water_area" type="area">
         <style facecolor="#28defc" edgecolor="#000000" linewidth="0.21" />
     </symbol>
     <symbol id="osm_wetland" type="area">
-        <style facecolor="none" edgecolor="#28defc" linewidth="0" />
+        <style facecolor="28defc" linewidth="0.5" />
     </symbol>
     
     <symbol id="osm_garden" type="area">
         <style facecolor="#9acd32" edgecolor="#000000" linewidth="0.20" />
+    </symbol>
+    <symbol id="boundary_line" type="area">
+        <style facecolor="none" edgecolor="black" linewidth="0.3" linestyle="dotted" />    
+    </symbol>
+    <symbol id="cultivated_land" type="area">
+        <style facecolor="#f7b667" edgecolor="#000000" linewidth="0.3" linestyle="solid"/>
     </symbol>
 
 </root>
