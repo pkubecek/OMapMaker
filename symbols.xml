@@ -1,12 +1,15 @@
 <root>
     <symbol id="kupka" type="point">
-        <path d="M 4 0 A 4 4 0 0 4 -4 0 A 4 4 0 0 4 4 0 Z" />
+        <path d="M 3 0 A 3 3 0 0 3 -3 0 A 3 3 0 0 3 3 0 Z" />
         <style facecolor="sienna" edgecolor="none" linewidth="0" />
     </symbol>
-
+    <symbol id="power_tower" type="point">
+        <path d="M -2 -2 L 2 -2 L 2 2 L -2 2 Z" />
+        <style facecolor="black" edgecolor="none" linewidth="0" />
+    </symbol>
     <symbol id="prohluben" type="point">
-        <path d="M -4 0 A 4 4 0 0 4 4 0" />
-        <style facecolor="none" edgecolor="sienna" linewidth="0.6" />
+        <path d="M -3 0 A 3 3 0 0 3 3 0" />
+        <style facecolor="none" edgecolor="sienna" linewidth="0.45" />
     </symbol>
     <symbol id="vrstevnice_major" type="line">
         <style color="saddlebrown" linewidth="0.8" linestyle="solid" />
@@ -29,8 +32,11 @@
     <symbol id="osm_road_path" type="line">
         <style color="#000000" linewidth="0.6" linestyle="(0, (5, 1.5))" />
     </symbol>
-        <symbol id="narrow_ride" type="line">
+    <symbol id="narrow_ride" type="line">
         <style color="#000000" linewidth="0.4" linestyle="(0, (15, 1.5))"  />
+    </symbol>
+    <symbol id="power_line" type="line">
+        <style color="#000000" linewidth="0.4" linestyle="solid"  />
     </symbol>
     <symbol id="osm_railway_main" type="line">
         <style color="black" linewidth="2" /> 
@@ -60,5 +66,7 @@
     <symbol id="cultivated_land" type="area">
         <style facecolor="#f7b667" edgecolor="#000000" linewidth="0.3" linestyle="solid"/>
     </symbol>
-
+    <symbol id="osm_orchard_vineyard" type="area">
+        <style facecolor="#f7b667" edgecolor="#0e990e" linewidth="4" linestyle="solid"/>
+    </symbol>
 </root>
