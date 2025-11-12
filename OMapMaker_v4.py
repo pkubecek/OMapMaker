@@ -1244,15 +1244,14 @@ def run_main_analysis():
         root.update_idletasks()
         gdf_osm = None
         try:
-            download_minx = minx - 200 #přidává přesah stažení, aby se nestávalo, že se nevykreslí okrajová data
-            download_maxx = maxx + 200
-            download_miny = miny - 200
-            download_maxy = maxy + 200
+            #download_minx = minx - 100 #přidává přesah stažení, aby se nestávalo, že se nevykreslí okrajová data
+            #download_maxx = maxx + 100
+            #download_miny = miny - 100
+            #download_maxy = maxy + 100
             
-            print(f"Rozsah stahování OSM (SJTSK): ({download_minx:.2f}, {download_miny:.2f}) až ({download_maxx:.2f}, {download_maxy:.2f})")
             to_wgs = Transformer.from_crs("EPSG:5514", "EPSG:4326", always_xy=True)
-            minlon, minlat = to_wgs.transform(download_minx, download_miny)
-            maxlon, maxlat = to_wgs.transform(download_maxx, download_maxy)
+            minlon, minlat = to_wgs.transform(minx, miny)
+            maxlon, maxlat = to_wgs.transform(maxx, maxy)
             tags = {
                 "highway": True, "building": True, "waterway": True,
                 "amenity": ["parking"],
@@ -1264,7 +1263,7 @@ def run_main_analysis():
                             "landfill", "quarry"],
                 "natural": ["water", "wetland", "wood", "grassland"],
             }
-            bbox = (maxlat, minlat, maxlon, minlon) 
+            bbox = (minlon, minlat, maxlon, maxlat) 
             gdf_osm = ox.features_from_bbox(bbox, tags=tags)
             gdf_osm = gdf_osm.to_crs("EPSG:5514")
             print("OSM data stažena.")
@@ -1299,7 +1298,6 @@ def run_main_analysis():
                     gdf = gpd.read_file(path)
                     gdf = map_zabaged_to_osm(gdf, os.path.basename(path))
                     
-                    # Zjišťujeme, které kategorie cest soubor obsahuje
                     if 'highway' in gdf.columns and gdf['highway'].notna().any():
                         gdf_categorized = categorize_highways(gdf.copy()) # Voláme naši pomocnou funkci
                         if 'major' in gdf_categorized['map_category'].values: zabaged_replaces['highway_major'] = True
