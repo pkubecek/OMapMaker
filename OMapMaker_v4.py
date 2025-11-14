@@ -937,6 +937,12 @@ def add_vector_layers(ax, gdf, extent):
                 gpd.GeoSeries([geom]).plot(ax=ax, zorder=4, **style_props) 
                 if custom_ls and ax.collections:
                     ax.collections[-1].set_linestyle(custom_ls) # Aplikujeme tuple
+            elif highway_type == "narrow_ride":
+                style_props = style_narrow_ride.copy()
+                custom_ls = style_props.pop('linestyle', None) # Odebereme tuple ze stylu
+                gpd.GeoSeries([geom]).plot(ax=ax, zorder=4, **style_props) 
+                if custom_ls and ax.collections:
+                    ax.collections[-1].set_linestyle(custom_ls)
 
     # Železnice
     if not railways.empty:
@@ -968,31 +974,7 @@ def add_vector_layers(ax, gdf, extent):
     if not gardens.empty:
         gardens.plot(ax=ax, **style_garden, zorder=1.5)
     if not boundaries.empty:
-        valid_exteriors = boundaries.geometry.exterior.dropna()
-        
-        if not valid_exteriors.empty:
-            plot_style = style_boundary.copy()
-            capstyle = plot_style.pop('dash_capstyle', 'butt')
-            linestyle = plot_style.pop('linestyle', 'solid')
-            if 'color' in plot_style:
-                plot_style['colors'] = plot_style.pop('color')
-            if 'edgecolor' in plot_style:
-                 plot_style['colors'] = plot_style.pop('edgecolor')
-            if 'linewidth' in plot_style:
-                plot_style['linewidths'] = plot_style.pop('linewidth')
-            segments = []
-            for geom in valid_exteriors:
-                if geom.geom_type == 'LineString':
-                    segments.append(geom.coords)
-                elif geom.geom_type == 'MultiLineString':
-                    for line in geom.geoms:
-                        segments.append(line.coords)
-            if segments:
-                lc = LineCollection(segments, **plot_style)
-                lc.set_linestyle(linestyle)
-                if capstyle == 'round':
-                    lc.set_dash_capstyle('round')
-                ax.add_collection(lc)  
+        boundaries.plot(ax=ax, **style_boundary, zorder=1.4)
     if not cultivated_land.empty:
         plot_dotted_hatch(ax, cultivated_land, style_cultivated, zorder=1.3)
     if not orchards_vineyards.empty:
