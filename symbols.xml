@@ -1,15 +1,15 @@
 <root>
     <symbol id="kupka" type="point">
-        <path d="M 3 0 A 3 3 0 0 3 -3 0 A 3 3 0 0 3 3 0 Z" />
+        <path d="M 4 0 A 4 4 0 0 4 -4 0 A 4 4 0 0 4 4 0 Z" />
         <style facecolor="sienna" edgecolor="none" linewidth="0" />
     </symbol>
     <symbol id="power_tower" type="point">
-        <path d="M -2 -2 L 2 -2 L 2 2 L -2 2 Z" />
+        <path d="M -4 -4 L 4 -4 L 4 4 L -4 4 Z" />
         <style facecolor="black" edgecolor="none" linewidth="0" />
     </symbol>
     <symbol id="prohluben" type="point">
-        <path d="M -3 0 A 3 3 0 0 3 3 0" />
-        <style facecolor="none" edgecolor="sienna" linewidth="0.45" />
+        <path d="M -4 0 A 4 4 0 0 4 4 0" />
+        <style facecolor="none" edgecolor="sienna" linewidth="0.6" />
     </symbol>
     <symbol id="vrstevnice_major" type="line">
         <style color="saddlebrown" linewidth="0.8" linestyle="solid" />
@@ -39,7 +39,7 @@
         <style color="#000000" linewidth="0.4" linestyle="solid"  />
     </symbol>
     <symbol id="osm_railway_main" type="line">
-        <style color="black" linewidth="2" /> 
+        <style color="black" linewidth="3" /> 
     </symbol>
     <symbol id="osm_railway_detail" type="line">
         <style color="white" linewidth="1.4" linestyle="(0, (3, 3))" />
@@ -58,7 +58,7 @@
     </symbol>
     
     <symbol id="osm_garden" type="area">
-        <style facecolor="#9acd32" edgecolor="#000000" linewidth="0.20" />
+        <style facecolor="#9acd32" edgecolor="#000000" linewidth="0.40" />
     </symbol>
     <symbol id="boundary_line" type="area">
         <style facecolor="none" edgecolor="black" linewidth="0.3" linestyle="dotted" />    

@@ -10,10 +10,10 @@ import numpy as np
 from scipy.interpolate import griddata, splprep, splev
 import matplotlib.pyplot as plt 
 from matplotlib.colors import ListedColormap, BoundaryNorm
-from scipy.ndimage import (binary_dilation, gaussian_filter, label, find_objects, minimum_filter, maximum_filter)
+from scipy.ndimage import (binary_dilation, binary_erosion, gaussian_filter, label, find_objects, minimum_filter, maximum_filter)
 from matplotlib.collections import LineCollection
 from matplotlib.transforms import Affine2D
-from matplotlib.patches import PathPatch
+from matplotlib.patches import PathPatch, Polygon as MplPolygon
 import geopandas as gpd
 from shapely.geometry import LineString, MultiLineString, Polygon, MultiPolygon, box, shape, Point, MultiPoint
 from shapely.ops import unary_union, shape
@@ -114,9 +114,9 @@ def load_dmr_grid(dmr_path, resolution_points=1500j):
     if len(points) > MAX_GRIDDATA_POINTS:
         print(f"  -> Počet DMR bodů ({len(points)}) je příliš vysoký pro griddata.")
         print(f"  -> Redukuji počet bodů na {MAX_GRIDDATA_POINTS} (náhodný výběr).")
-        indices = np.random.choice(len(points), MAX_GRIDDATA_POINTS, replace=False)
+        indices = np.random.choice(len(points), MAX_GRIDDATA_POINTS, replace=False)        
         points = points[indices] 
-        z = z[indices]    
+        z = z[indices]   
         
     dmr_grid_interpolated = griddata(points, z, (grid_x, grid_y), method='cubic')
     
@@ -144,6 +144,7 @@ def load_dmr_grid(dmr_path, resolution_points=1500j):
     dmr_grid[nan_mask] = np.nan
             
     return dmr_grid, grid_x, grid_y, extent, points, z
+
 def load_dmp_grid(dmp_path, grid_x, grid_y, extent):
     print(f"Načítám DMP: {dmp_path}")
     status_label.config(text="Načítám DMP...")
@@ -170,8 +171,7 @@ def load_dmp_grid(dmp_path, grid_x, grid_y, extent):
             print(f"  -> VAROVÁNÍ: Počet DMP bodů ({len(points)}) je příliš vysoký pro griddata.")
             print(f"  -> Redukuji počet bodů na {MAX_GRIDDATA_POINTS} (náhodný výběr).")
             
-            indices = np.random.choice(len(points), MAX_GRIDDATA_POINTS, replace=False)
-            
+            indices = np.linspace(0, len(points) - 1, MAX_GRIDDATA_POINTS, dtype=int)            
             points = points[indices]
             z = z[indices] 
             
@@ -221,7 +221,7 @@ def load_dmp_grid(dmp_path, grid_x, grid_y, extent):
         
     return dmp_grid
 
-def plot_lines(ax, grid_x, grid_y, data_grid, levels, style_id, zorder=15, smooth_factor=2):
+def plot_lines(ax, grid_x, grid_y, data_grid, levels, style_id, zorder=15, smooth_factor=1.6):
     style = SYMBOL_LIBRARY.get(style_id)
     if not style or style["type"] != 'line':
         print(f"Styl '{style_id}' nenalezen, použije se nouzový.")
@@ -296,56 +296,67 @@ def plot_lines(ax, grid_x, grid_y, data_grid, levels, style_id, zorder=15, smoot
     except Exception as e:
         print(f"⚠️ Chyba při kreslení vrstevnic ({style_id}): {e}")
 
-def add_contour_lines(ax, grid_x, grid_y, dmr_grid, smoothing_s=2):
+def add_contour_lines(ax, grid_x, grid_y, dmr_grid_unclipped, smoothing_s=1.6, clip_mask=None):
     print("Kreslím vrstevnice...")
     status_label.config(text="Kreslím vrstevnice...")
     root.update_idletasks()
 
-    min_z = np.nanmin(dmr_grid)
-    max_z = np.nanmax(dmr_grid)
+    if clip_mask is not None:
+        print("  -> Aplikuji ořezovou masku na vrstevnice.")
+        dmr_grid_plot = np.where(clip_mask, dmr_grid_unclipped, np.nan)
+    else:
+        dmr_grid_plot = dmr_grid_unclipped # Kreslíme vše
+
+    min_z = np.nanmin(dmr_grid_plot)
+    max_z = np.nanmax(dmr_grid_plot)
     
     major_levels = np.arange(np.floor(min_z / 25) * 25, np.ceil(max_z / 25) * 25 + 1, 25)
     base_levels = np.arange(np.floor(min_z / 5) * 5, np.ceil(max_z / 5) * 5 + 1, 5)
     minor_levels = np.arange(np.floor(min_z / 2.5) * 2.5, np.ceil(max_z / 2.5) * 2.5 + 1, 2.5)
     minor_levels = [lvl for lvl in minor_levels if lvl not in base_levels]
 
-    plot_lines(ax, grid_x, grid_y, dmr_grid, major_levels, 'vrstevnice_major', zorder=16, smooth_factor=smoothing_s)
-    plot_lines(ax, grid_x, grid_y, dmr_grid, base_levels, 'vrstevnice_base', zorder=15, smooth_factor=smoothing_s)
+    # Kreslíme hlavní a základní vrstevnice z oříznuté 'dmr_grid_plot'
+    plot_lines(ax, grid_x, grid_y, dmr_grid_plot, major_levels, 'vrstevnice_major', zorder=16, smooth_factor=smoothing_s)
+    plot_lines(ax, grid_x, grid_y, dmr_grid_plot, base_levels, 'vrstevnice_base', zorder=15, smooth_factor=smoothing_s)
     
-    print("  -> Počítám masku pro doplňkové vrstevnice (kombinovaná logika)...")
+    print("  -> Počítám masku pro doplňkové vrstevnice (z plných dat)...")
     
-    valid_data_mask = ~np.isnan(dmr_grid)
-    curvature_mask = np.zeros_like(dmr_grid, dtype=bool)
-    gentle_slope_mask = np.zeros_like(dmr_grid, dtype=bool)
+    # 2. VÝPOČETNÍ MŘÍŽKA (bez NaN)
+    valid_data_mask = ~np.isnan(dmr_grid_unclipped)
+    filled_mean = np.nanmean(dmr_grid_unclipped)
+    if np.isnan(filled_mean): filled_mean = 0 
+        
+    dmr_grid_calc = np.nan_to_num(dmr_grid_unclipped, nan=filled_mean)
 
-    gy, gx = np.gradient(dmr_grid)
+    curvature_mask = np.zeros_like(dmr_grid_calc, dtype=bool)
+    gentle_slope_mask = np.zeros_like(dmr_grid_calc, dtype=bool)
+
+    gy, gx = np.gradient(dmr_grid_calc) 
 
     gxx, _ = np.gradient(gx)
     _, gyy = np.gradient(gy)
     curvature = np.abs(gxx + gyy)
     
-    valid_curvature = curvature[valid_data_mask]
+    safe_calculation_mask = binary_erosion(valid_data_mask, iterations=2)
+    
+    valid_curvature = curvature[safe_calculation_mask] # <--- ZMĚNA
     if valid_curvature.size > 0:
         curvature_threshold = np.percentile(valid_curvature, 99.3) 
         curvature_mask = (curvature > curvature_threshold) & valid_data_mask
-
     slope = np.hypot(gx, gy)
-    
-    valid_slope = slope[valid_data_mask]
+    valid_slope = slope[safe_calculation_mask] # <--- ZMĚNA
     if valid_slope.size > 0:
         slope_min_threshold = np.percentile(valid_slope, 10) 
         slope_max_threshold = np.percentile(valid_slope, 25) 
         gentle_slope_mask = (slope > slope_min_threshold) & (slope < slope_max_threshold) & valid_data_mask
 
     combined_mask = curvature_mask | gentle_slope_mask
-    
     dilated_mask = binary_dilation(combined_mask, iterations=10)
-    
-    dmr_grid_combined = np.where(dilated_mask, dmr_grid, np.nan)
+    dmr_grid_combined = np.where(dilated_mask, dmr_grid_plot, np.nan)
     
     plot_lines(ax, grid_x, grid_y, dmr_grid_combined, minor_levels, 'vrstevnice_doplnk', zorder=14, smooth_factor=smoothing_s)
 
-def vectorize_rocks(grid_x, grid_y, dmr_grid, transform, slope_threshold_deg=52):
+def vectorize_rocks(grid_x, grid_y, dmr_grid, transform, slope_threshold_deg=57):
     print("Vektorizuji skály...")
     status_label.config(text="Vektorizuji skály...")
     root.update_idletasks()
@@ -439,7 +450,7 @@ def vectorize_rocks(grid_x, grid_y, dmr_grid, transform, slope_threshold_deg=52)
         status_label.config(text=f"Chyba při vektorizaci skal: {e}", fg="red")
         return gpd.GeoDataFrame(columns=['class_name', 'class_id', 'geometry'], crs="EPSG:5514")
 
-def add_depressions(ax, grid_x, grid_y, dmr_grid, pixel_size=1.0, min_diameter=2.0, max_diameter=5.0, min_depth=0.5):
+def add_depressions(ax, grid_x, grid_y, dmr_grid, pixel_size=1.0, min_diameter=0.9, max_diameter=5.0, min_depth=0.9):
     print("Detekuji prohlubně...")
     status_label.config(text="Detekuji prohlubně...")
     root.update_idletasks()
@@ -487,7 +498,7 @@ def add_depressions(ax, grid_x, grid_y, dmr_grid, pixel_size=1.0, min_diameter=2
         )
         ax.add_patch(patch)
 
-def add_knoll_symbols(ax, grid_x, grid_y, dmr_grid, pixel_size=1.0, min_height=0.5, max_diameter=3.0):
+def add_knoll_symbols(ax, grid_x, grid_y, dmr_grid, pixel_size=1.0, min_height=0.75, max_diameter=5.0):
     print("Detekuji kupky...")
     status_label.config(text="Detekuji kupky...")
     root.update_idletasks()
@@ -570,11 +581,8 @@ def plot_dashed_hatch(ax, gdf, style_props, zorder=4):
     clipped_lines = multi_lines.intersection(all_geoms)
     
     if not clipped_lines.is_empty:
-        # --- OPRAVA ZDE ---
-        # 1. Vytvoříme GeoSeries
         plot_series = gpd.GeoSeries([clipped_lines])
         
-        # 2. Vykreslíme je (ale bez 'linestyle' tuple)
         plot_series.plot(
             ax=ax, 
             color=hatch_color, 
@@ -582,8 +590,6 @@ def plot_dashed_hatch(ax, gdf, style_props, zorder=4):
             linestyle='solid', # Použijeme dočasně 'solid'
             zorder=zorder - 1 
         )
-        
-        # 3. Získáme poslední přidanou kolekci a nastavíme jí správný styl
         if ax.collections:
             ax.collections[-1].set_linestyle(hatch_style)
         # --- KONEC OPRAVY ---
@@ -828,9 +834,9 @@ def vectorize_vegetation(classified_raster_raw, class_names, transform, dmr_path
         status_label.config(text="Zjednodušuji polygony...")
         root.update_idletasks()
         
-        gdf.geometry = gdf.geometry.buffer(1.3)
+        gdf.geometry = gdf.geometry.buffer(2)
         
-        gdf.geometry = gdf.geometry.simplify(1, preserve_topology=True) 
+        gdf.geometry = gdf.geometry.simplify(2, preserve_topology=True) 
             
         print("  -> Zjednodušení PŘED spojením hotovo.")
         print("Spojuji polygony podle třídy (Dissolve)...")
@@ -919,10 +925,10 @@ def add_vector_layers(ax, gdf, extent):
             
             if geom.is_empty: continue 
                         
-            if highway_type in ["motorway", "trunk", "primary", "osm_road_major"]:
+            if highway_type in ["secondary", "tertiary", "motorway", "trunk", "primary", "osm_road_major"]:
                 gpd.GeoSeries([geom]).buffer(3.5).plot(ax=ax, zorder=5, **style_major_road)
             
-            elif highway_type in ["secondary", "tertiary", "residential", "cycleway", "pedestrian", "service", "unclassified", "osm_road_secondary"]:
+            elif highway_type in [ "residential", "cycleway", "pedestrian", "service", "unclassified"]:
                 gpd.GeoSeries([geom]).plot(ax=ax, zorder=4, **style_road_secondary)
 
             elif highway_type in ["road", "cycleway","service", "track", "osm_road_track"]:
@@ -1088,8 +1094,8 @@ def categorize_highways(gdf):
 
     # Toto je logika, kterou přesouváme z 'add_vector_layers'
     conditions = [
-        gdf['highway'].isin(["motorway", "trunk", "primary", "osm_road_major"]),
-        gdf['highway'].isin(["secondary", "tertiary", "residential", "unclassified", "osm_road_secondary"]),
+        gdf['highway'].isin(["motorway", "trunk", "primary", "osm_road_major", "osm_road_secondary", "osm_road_tertiary"]),
+        gdf['highway'].isin(["tertiary", "residential", "unclassified"]),
         gdf['highway'].isin(["road", "service", "track", "osm_road_track"]),
         gdf['highway'].isin(["path", "footway", "bridleway", "pedestrian", "cycleway", "osm_road_path"]),
         gdf['highway'].isin(["narrow_ride"])
@@ -1125,27 +1131,53 @@ def remove_selected_from_listbox(listbox_widget):
         print(f"Odebírám: {listbox_widget.get(index)}")
         listbox_widget.delete(index)
 
-def setup_map_figure(extent): 
-    minx, maxx, miny, maxy = extent
-    METERS_PER_INCH = 254.0
-    data_width_m = maxx - minx
-    data_height_m = maxy - miny
-    fig_width_in = data_width_m / METERS_PER_INCH
-    fig_height_in = data_height_m / METERS_PER_INCH
-    print(f"Nastavuji plátno: {fig_width_in:.2f}\" x {fig_height_in:.2f}\" @ 1:10 000")
-    fig, ax = plt.subplots(figsize=(fig_width_in, fig_height_in))
+def setup_map_figure(extent_original_data, paper_format="A3 (Landscape)"): 
+    SCALE = 10000.0     # Měřítko 1:10 000
+    
+    # Slovník velikostí papírů v palcích
+    # (Šířka, Výška) pro orientaci na šířku (Landscape)
+    PAPER_SIZES_IN = {
+        "A3 (Landscape)": (16.535, 11.693),
+        "A3 (Portrait)": (11.693, 16.535),
+        "A4 (Landscape)": (11.693, 8.268),
+        "A4 (Portrait)": (8.268, 11.693)
+    }
+    
+    FIG_WIDTH_IN, FIG_HEIGHT_IN = PAPER_SIZES_IN.get(paper_format, PAPER_SIZES_IN["A3 (Landscape)"])    # Získáme rozměry z výběru, s pojistkou na A3
+    
+    INCHES_TO_METERS = 0.0254    # Převod palců na metry
+    
+    # Vypočítáme, kolik metrů v terénu odpovídá papíru v daném měřítku
+    map_width_meters = FIG_WIDTH_IN * INCHES_TO_METERS * SCALE
+    map_height_meters = FIG_HEIGHT_IN * INCHES_TO_METERS * SCALE
+    
+    print(f"Setting paper format {paper_format} (1:10 000): {map_width_meters:.2f} m x {map_height_meters:.2f} m")
+
+    minx_orig, maxx_orig, miny_orig, maxy_orig = extent_original_data    # Najdeme střed původní datové oblasti
+    center_x = (minx_orig + maxx_orig) / 2
+    center_y = (miny_orig + maxy_orig) / 2
+    
+    minx = center_x - (map_width_meters / 2)    # Vypočítáme nový rozsah (extent) pro plátno, vycentrolovaný
+    maxx = center_x + (map_width_meters / 2)
+    miny = center_y - (map_height_meters / 2)
+    maxy = center_y + (map_height_meters / 2)
+
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH_IN, FIG_HEIGHT_IN))    # Vytvoříme plátno s pevně danou velikostí v palcích
+    
     ax.set_xlim(minx, maxx)
     ax.set_ylim(miny, maxy)
+    
     ax.set_aspect('equal') 
     ax.axis('off') 
-    return fig, ax
+    extent_a3_scaled = (minx, maxx, miny, maxy)    # Vracíme finální rozsah, který bude použit pro ořez dat
+    return fig, ax, extent_a3_scaled
 
 def run_main_analysis():
     dmr_path = dmr_entry.get()
     dmp_path = dmp_entry.get()
     should_save_png = save_var.get()
     should_save_vector = save_vector_var.get()
-    
+    selected_paper_format = paper_format_var.get()
     zabaged_paths = zabaged_listbox.get(0, tk.END) 
     other_shp_path = other_shp_entry.get()
     
@@ -1171,8 +1203,20 @@ def run_main_analysis():
 
         dmr_grid_cubic, grid_x, grid_y, extent, dmr_points, dmr_z = load_dmr_grid(dmr_path)
         (minx, maxx, miny, maxy) = extent
+        status_label.config(text="Vytvářím ořezovou masku...")
+        root.update_idletasks()
+        try:
+            # Vytvoříme polygon z vnějšího obrysu všech DMR bodů
+            clip_polygon = MultiPoint(dmr_points).convex_hull
+            if not clip_polygon.is_valid:
+                print("  -> Varování: Convex hull není validní, zkouším buffer(0)")
+                clip_polygon = clip_polygon.buffer(0)
+            print("  -> Ořezová maska (Convex Hull) vytvořena.")
+        except Exception as e:
+            print(f"  -> CHYBA při tvorbě ořezové masky: {e}. Maskování bude přeskočeno.")
+            clip_polygon = None
         
-        print("Interpoluji DMR mřížku (Linear) pro skály...")
+        print("Interpoluji mřížku  pro skály...")
         status_label.config(text="Interpoluji DMR mřížku (Linear)...")
         root.update_idletasks()
         
@@ -1374,6 +1418,38 @@ def run_main_analysis():
                     gdf_main = gpd.GeoDataFrame(df_main, geometry='geometry', crs="EPSG:5514")
                 else:
                     gdf_main = gdf_zabaged # Pokud není OSM, použij jen ZABAGED
+        print("Vytvářím ořezovou masku...")
+        status_label.config(text="Vytvářím ořezovou masku...")
+        root.update_idletasks()
+        try:
+            # Vytvoříme polygon z vnějšího obrysu všech DMR bodů
+            clip_polygon = MultiPoint(dmr_points).convex_hull
+            if not clip_polygon.is_valid:
+                print("  -> Varování: Convex hull není validní, zkouším buffer(0)")
+                clip_polygon = clip_polygon.buffer(0)
+            print("  -> Ořezová maska (Convex Hull) vytvořena.")
+
+            print("Ořezávám hlavní GDF (OSM/ZABAGED) na ořezovou masku...")
+            status_label.config(text="Ořezávám vektory (Data)...")
+            root.update_idletasks()
+            if gdf_main is not None and not gdf_main.empty:
+                try:
+                    # Ořez GDF na convex hull
+                    gdf_main = gpd.clip(gdf_main, clip_polygon)
+                except Exception as e:
+                    print(f"  -> Varování: Selhal ořez gdf_main: {e}")
+            
+            print("Ořezávám 'Jiné SHP' na ořezovou masku...")
+            if gdf_other is not None and not gdf_other.empty:
+                try:
+                    # Ořez GDF na convex hull
+                    gdf_other = gpd.clip(gdf_other, clip_polygon)
+                except Exception as e:
+                    print(f"  -> Varování: Selhal ořez gdf_other: {e}")
+
+        except Exception as e:
+            print(f"  -> CHYBA při tvorbě/ořezu ořezové masky: {e}. Maskování vektorů bude přeskočeno.")
+            clip_polygon = None # Důležité pro další krok
         
         progress_bar["value"] = 35
 
@@ -1421,15 +1497,49 @@ def run_main_analysis():
         
         vec_raster_input = np.nan_to_num(vegetation_height, nan=-9999)
         classified_raster = np.digitize(vec_raster_input, bins).astype(np.int32)
-        
+        # --- PŘIDANÝ KÓD: MASKOVÁNÍ RASTROVÝCH DAT ---
+        if clip_polygon:
+            print("Rasterizuji ořezovou masku (Convex Hull) pro gridy...")
+            status_label.config(text="Rasterizuji ořezovou masku...")
+            root.update_idletasks()
+            try:
+                clip_geoms = [(clip_polygon, 1)]
+                clip_mask_transposed = rasterize(
+                    clip_geoms,
+                    out_shape=(shape[1], shape[0]), # (height, width)
+                    transform=transform,
+                    fill=0,
+                    default_value=1,
+                    dtype=np.uint8
+                )
+                clip_mask_grid = np.flipud(clip_mask_transposed).T.astype(bool)
+                print("Aplikuji ořezovou masku na gridy...")
+                classified_raster[~clip_mask_grid] = 0
+                dmr_grid_linear_viz_mask_input = np.nan_to_num(dmr_grid_linear, nan=0)
+                dmr_grid_linear_viz_mask_input[~clip_mask_grid] = 0
+                dmr_grid_cubic_viz_mask_input = np.nan_to_num(dmr_grid_cubic, nan=0)
+                dmr_grid_cubic_viz_mask_input[~clip_mask_grid] = np.nan
+                dmr_grid_linear_viz_features = np.nan_to_num(dmr_grid_linear, nan=0)
+                dmr_grid_linear_viz_features[~clip_mask_grid] = 0
+            except Exception as e:
+                print(f"  -> CHYBA: Selhalo maskování gridů: {e}")
+                # Pokud selže, použijeme nemaskovaná data
+                dmr_grid_linear_viz_mask_input = np.nan_to_num(dmr_grid_linear, nan=0)
+                dmr_grid_cubic_viz_mask_input = np.nan_to_num(dmr_grid_cubic, nan=0)
+                dmr_grid_linear_viz_features = np.nan_to_num(dmr_grid_linear, nan=0)
+        else:
+            # Pokud nebyl polygon (chyba v kroku 1), použijeme nemaskovaná data
+            dmr_grid_linear_viz_mask_input = np.nan_to_num(dmr_grid_linear, nan=0)
+            dmr_grid_cubic_viz_mask_input = np.nan_to_num(dmr_grid_cubic, nan=0)
+            dmr_grid_linear_viz_features = np.nan_to_num(dmr_grid_linear, nan=0)
         gdf_vegetation = vectorize_vegetation(
             classified_raster, class_names, transform, dmr_path,
             save_gpkg=should_save_vector
         )
         progress_bar["value"] = 60
         
-        dmr_grid_cubic_viz = np.nan_to_num(dmr_grid_cubic, nan=0) 
-        dmr_grid_linear_viz = np.nan_to_num(dmr_grid_linear, nan=0) 
+        dmr_grid_cubic_viz = dmr_grid_cubic_viz_mask_input
+        dmr_grid_linear_viz = dmr_grid_linear_viz_mask_input
         
         gdf_rocks = vectorize_rocks(
             grid_x, grid_y, dmr_grid_linear_viz, transform 
@@ -1440,14 +1550,11 @@ def run_main_analysis():
             print("Vektorizace dokončena. Generování PNG přeskočeno.")
             status_label.config(text="✅ Vektorizace hotova.", fg="darkgreen")
             progress_bar["value"] = 100
-            root.after(2000, lambda: status_label.config(text="Připraven.", foreground="darkgreen"))
+            root.after(2000, lambda: status_label.config(text="Done.", foreground="darkgreen"))
             return 
 
-        tile_divisions = 2 
-        print(f"Detekováno ukládání PNG, bude použito {tile_divisions}x{tile_divisions} dlaždic.")
-        
-        tile_width = (maxx - minx) / tile_divisions
-        tile_height = (maxy - miny) / tile_divisions
+        tile_divisions = 1 # Vynutíme pouze jednu dlaždici (celou A3 mapu)
+        print(f"Detekováno ukládání PNG, bude použita 1 dlaždice (formát A3).")       
         temp_files = []
         total_tiles = tile_divisions * tile_divisions
         
@@ -1459,16 +1566,23 @@ def run_main_analysis():
                 print(f"--- Generuji PNG dlaždici ({i}, {j}) ---")
                 root.update_idletasks()
 
-                tile_minx = minx + j * tile_width
-                tile_maxx = minx + (j + 1) * tile_width
-                tile_miny = maxy - (i + 1) * tile_height
-                tile_maxy = maxy - i * tile_height
-                tile_extent = (tile_minx, tile_maxx, tile_miny, tile_maxy)
-                clip_box_tile = box(tile_minx, tile_miny, tile_maxx, tile_maxy)
-
-                fig, ax = setup_map_figure(tile_extent)
+                fig, ax, tile_extent = setup_map_figure(extent, selected_paper_format)
+                # 'tile_extent' je nyní (minx, maxx, miny, maxy) pro A3
                 
-                status_label.config(text=f"Kreslím vektorový podklad... ({tile_num}/{total_tiles})")
+                (tile_minx, tile_maxx, tile_miny, tile_maxy) = tile_extent
+                clip_box_tile = box(tile_minx, tile_miny, tile_maxx, tile_maxy)
+                if clip_polygon:
+                    print("Ořez na platná data...")
+                    try:
+                        # Převedeme Shapely polygon na Matplotlib Patch
+                        hull_coords = np.array(clip_polygon.exterior.coords)
+                        clip_patch = MplPolygon(hull_coords, transform=ax.transData)
+                        # Nastavíme patch jako ořezovou masku pro celé plátno 'ax'
+                        ax.set_clip_path(clip_patch)
+                    except Exception as e:
+                        print(f"  -> CHYBA: Nepodařilo se aplikovat ořezovou masku: {e}")
+
+                status_label.config(text=f"Kreslím vektorový podklad... (1/1)")
                 root.update_idletasks()
 
                 # 1. Vykreslení vegetace (zorder 1.0 - 1.4)
@@ -1515,8 +1629,8 @@ def run_main_analysis():
                 root.update_idletasks()
                 add_contour_lines(ax, grid_x, grid_y, dmr_grid_cubic_viz) 
                 # 4. Kupky/Prohlubně/kameny (zorder 4, 6)
-                add_depressions(ax, grid_x, grid_y, dmr_grid_linear_viz, pixel_size=1.0, min_diameter=1, max_diameter=5, min_depth=0.2)
-                add_knoll_symbols(ax, grid_x, grid_y, dmr_grid_linear_viz, pixel_size=1.0)
+                add_depressions(ax, grid_x, grid_y, dmr_grid_linear_viz_features, pixel_size=1.0, min_diameter=1, max_diameter=5, min_depth=0.2)
+                add_knoll_symbols(ax, grid_x, grid_y, dmr_grid_linear_viz_features, pixel_size=1.0)
                 # 5. Cesty, budovy, voda... (zorder 3-11)
                 status_label.config(text=f"Kreslím vektory... ({tile_num}/{total_tiles})")
                 root.update_idletasks()
@@ -1534,48 +1648,48 @@ def run_main_analysis():
                 progress_val = 80 + (tile_num / total_tiles) * 15 
                 progress_bar["value"] = progress_val
         if temp_files:
-            status_label.config(text="Spojuji PNG dlaždice do finální mapy...")
-            print("Spojuji PNG dlaždice...")
+            status_label.config(text="Dokončuji finální mapu...")
+            print("Přesouvám finální PNG mapu...")
             root.update_idletasks()
-            tile_images_refs = {}
-            for i in range(tile_divisions):
-                tile_images_refs[i] = {}
-                for j in range(tile_divisions):
-                    idx = i * tile_divisions + j
-                    tile_images_refs[i][j] = Image.open(temp_files[idx])
-            total_width = sum(tile_images_refs[0][j].width for j in range(tile_divisions))
-            total_height = sum(tile_images_refs[i][0].height for i in range(tile_divisions))
-            final_image = Image.new('RGBA', (total_width, total_height))
-            current_y = 0
-            for i in range(tile_divisions):
-                current_x = 0
-                max_row_height = 0
-                for j in range(tile_divisions):
-                    img = tile_images_refs[i][j]
-                    final_image.paste(img, (current_x, current_y))
-                    current_x += img.width
-                    max_row_height = max(max_row_height, img.height)
-                    img.close() 
-                current_y += max_row_height
+
+            # Načteme ten jeden soubor
+            final_image = Image.open(temp_files[0])
+            
             output_path = os.path.splitext(dmr_path)[0] + "_OMap.png"
             print(f"Ukládám finální mapu: {output_path}")
+            
+            # Přímo uložíme, není co skládat
             final_image.save(output_path, "PNG")
+            
+            # Zavřeme handle
+            final_image.close() 
+
             print(f"Generuji World File pro: {output_path}")
-            data_width_m = maxx - minx
-            data_height_m = maxy - miny
-            img_width_px = final_image.width
-            img_height_px = final_image.height
+            
+            # Rozsah dat nyní odpovídá 'tile_extent'
+            (minx_a3, maxx_a3, miny_a3, maxy_a3) = tile_extent
+            
+            data_width_m = maxx_a3 - minx_a3
+            data_height_m = maxy_a3 - miny_a3
+            
+            # Musíme znovu načíst rozměry uloženého obrázku
+            with Image.open(output_path) as img:
+                img_width_px = img.width
+                img_height_px = img.height
+
             pixel_size_x = data_width_m / img_width_px
             pixel_size_y = data_height_m / img_height_px
-            x_center = minx + (pixel_size_x / 2.0)
-            y_center = maxy - (pixel_size_y / 2.0) # Y-osa je v GISu "obráceně"
+            
+            x_center = minx_a3 + (pixel_size_x / 2.0)
+            y_center = maxy_a3 - (pixel_size_y / 2.0) 
+            
             world_file_content = (
-                f"{pixel_size_x}\n"  # 1: Velikost pixelu v X
-                f"0.0\n"              # 2: Rotace (D)
-                f"0.0\n"              # 3: Rotace (B)
-                f"{-pixel_size_y}\n" # 4: Velikost pixelu v Y (vždy záporná)
-                f"{x_center}\n"       # 5: X souřadnice středu levého horního pixelu
-                f"{y_center}\n"       # 6: Y souřadnice středu levého horního pixelu
+                f"{pixel_size_x}\n"  
+                f"0.0\n"              
+                f"0.0\n"              
+                f"{-pixel_size_y}\n" 
+                f"{x_center}\n"       
+                f"{y_center}\n"       
             )
             world_file_path = os.path.splitext(output_path)[0] + ".pgw"
             try:
@@ -1592,7 +1706,7 @@ def run_main_analysis():
         elif not should_save_png and should_save_vector:
              status_label.config(text="✅ Vektorizace hotova.", fg="darkgreen")
         progress_bar["value"] = 100
-        root.after(2000, lambda: status_label.config(text="Připraven.", foreground="darkgreen"))
+        root.after(2000, lambda: status_label.config(text="Done.", foreground="darkgreen"))
     except Exception as e:
         messagebox.showerror("Chyba analýzy", str(e))
         status_label.config(text=f"❌ Chyba: {str(e)}", fg="red")
@@ -1608,6 +1722,8 @@ LAS_TIF_FILES = [
 root = tk.Tk()
 root.title("OMapMaker")
 root.state('zoomed')
+paper_format_var = tk.StringVar()
+paper_format_options = ["A3 (Landscape)", "A3 (Portrait)", "A4 (Landscape)", "A4 (Portrait)"]
 main_frame = ttk.Frame(root, padding="15")
 main_frame.pack(fill=tk.BOTH, expand=True)
 required_frame = ttk.Labelframe(main_frame, text="LIDAR data (.las/.laz)", padding="10")
@@ -1678,6 +1794,15 @@ ttk.Label(classify_frame, text="Vegetation: slow running").grid(row=3, column=0,
 bin_entry_4 = ttk.Entry(classify_frame)
 bin_entry_4.insert(0, "11")
 bin_entry_4.grid(row=3, column=1, sticky="ew", padx=5, pady=5)
+ttk.Label(classify_frame, text="Formát výstupu:").grid(row=4, column=0, sticky="w", padx=5, pady=(15, 5))
+paper_format_combo = ttk.Combobox(
+    classify_frame,
+    textvariable=paper_format_var, # Tuto proměnnou definujeme v dalším kroku
+    values=paper_format_options, # Tuto proměnnou definujeme v dalším kroku
+    state="readonly" 
+)
+paper_format_combo.grid(row=4, column=1, sticky="ew", padx=5, pady=(15, 5))
+paper_format_combo.set(paper_format_options[0]) # Výchozí hodnota A3
 controls_frame = ttk.Frame(main_frame, padding="10")
 controls_frame.pack(fill=tk.X, expand=False, pady=(10, 0))
 save_var = tk.BooleanVar(value=True) 
@@ -1688,10 +1813,10 @@ ttk.Checkbutton(controls_frame, text="Save Vegetation to file (GPKG)",
                 variable=save_vector_var).pack(pady=5)
 run_button = ttk.Button(controls_frame, text="Generate map", 
                         command=run_main_analysis)
-run_button.pack(pady=10, fill=tk.X, ipady=5) 
+run_button.pack(pady=10, fill=tk.X, ipady=5)
 progress_bar = ttk.Progressbar(controls_frame, orient="horizontal", length=400, mode="determinate")
 progress_bar.pack(pady=10, fill=tk.X, expand=True)
 status_label = tk.Label(controls_frame, text="Hotovo.", anchor="center", foreground="darkgreen")
 status_label.pack(pady=5, fill=tk.X, expand=True)
 root.mainloop()
-print("--- OMapMaker: GUI ukončeno ---")
+print("--- OMapMaker: GUI has been shut down ---")
