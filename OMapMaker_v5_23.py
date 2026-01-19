@@ -7,11 +7,12 @@ from ast import literal_eval
 import laspy
 import rasterio 
 from rasterio.features import rasterize
+from rasterio.enums import Resampling
 import numpy as np
 from scipy.interpolate import griddata, splprep, splev
 import matplotlib.pyplot as plt 
 #from matplotlib.colors import ListedColormap, BoundaryNorm
-from scipy.ndimage import (binary_dilation, binary_erosion, gaussian_filter, label, laplace, find_objects, minimum_filter, maximum_filter)
+from scipy.ndimage import (binary_dilation, binary_erosion, gaussian_filter, label, laplace, find_objects, minimum_filter, maximum_filter, binary_opening, binary_closing)
 from matplotlib.collections import LineCollection
 from matplotlib.transforms import Affine2D
 from matplotlib.patches import PathPatch, Polygon as MplPolygon
@@ -106,28 +107,42 @@ def load_symbol_library(xml_file_path):
         return {}
     
 def load_dmr_grid(dmr_path, pixel_size=0.5):
-    """ Loads digital terrain model from LiDAR data with fixed pixel size """
+    """ Loads digital terrain model from LiDAR data with fixed pixel size - Memory Optimized (Chunking) """
     print(f"Načítám DMR s pixelem {pixel_size} m: {dmr_path}")
     status_label.config(text=f"Načítám DMR ({pixel_size}m pixel)...")
     root.update_idletasks()
     
-    las = laspy.read(dmr_path)
+    xs, ys, zs = [], [], []
     
-    classification = np.array(las.classification)
-    # Přemapování bodů (klasifikace 8 na 2)
-    classification[classification == 8] = 2 
-
-    mask = (classification == 2)
-    
-    if not np.any(mask):
-        raise ValueError("V souboru DMR nebyly nalezeny žádné body země.")
+    # --- OPTIMALIZACE: Čtení po blocích (Chunks) ---
+    # Tímto se vyhneme chybě 'LasReader object is not subscriptable' a šetříme RAM
+    with laspy.open(dmr_path) as fh:
+        print(f"  -> Skenuji soubor po blocích (celkem {fh.header.point_count} bodů)...")
         
-    x = las.x[mask]
-    y = las.y[mask]
-    z = las.z[mask]
-    
-    extent = (x.min(), x.max(), y.min(), y.max())
+        # Čteme po 1 000 000 bodech
+        for chunk in fh.chunk_iterator(1_000_000):
+            # Okamžitá filtrace klasifikace v paměti pro daný blok
+            # (Země bývá class 2, někdy 8)
+            clas = np.array(chunk.classification)
+            mask = (clas == 2) | (clas == 8)
+            
+            if np.any(mask):
+                xs.append(np.array(chunk.x[mask]))
+                ys.append(np.array(chunk.y[mask]))
+                zs.append(np.array(chunk.z[mask]))
 
+    # Spojení vyfiltrovaných bloků do jednoho pole
+    if not xs:
+        raise ValueError("V souboru DMR nebyly nalezeny žádné body země (class 2 nebo 8).")
+        
+    x = np.concatenate(xs)
+    y = np.concatenate(ys)
+    z = np.concatenate(zs)
+    
+    print(f"  -> Načteno {len(x)} bodů země.")
+    
+    # Výpočet rozsahu a mřížky
+    extent = (x.min(), x.max(), y.min(), y.max())
     grid_x, grid_y = np.mgrid[extent[0]:extent[1]:pixel_size, 
                               extent[2]:extent[3]:pixel_size]
     
@@ -137,9 +152,9 @@ def load_dmr_grid(dmr_path, pixel_size=0.5):
     
     points = np.vstack((x, y)).T
     
-    # Redukce bodů pro griddata, pokud je jich moc (limit je nutné zachovat kvůli RAM)
+    # Finální pojistka pro Griddata (pokud by i samotných bodů země bylo moc)
     if len(points) > MAX_GRIDDATA_POINTS:
-        print(f"  -> Redukuji počet vstupních bodů na {MAX_GRIDDATA_POINTS}.")
+        print(f"  -> Dodatečná redukce bodů země pro interpolaci na {MAX_GRIDDATA_POINTS}.")
         indices = np.random.choice(len(points), MAX_GRIDDATA_POINTS, replace=False)        
         points = points[indices] 
         z = z[indices]   
@@ -160,10 +175,7 @@ def load_dmr_grid(dmr_path, pixel_size=0.5):
         
     dmr_grid_filled = np.nan_to_num(dmr_grid_interpolated, nan=valid_mean)
     
-    # --- ZMĚNA: Sigma se musí škálovat podle pixelu ---
-    # Sigma = (požadované metry) / (velikost pixelu)
-    sigma_pixels = 4
-    
+    sigma_pixels = 5
     dmr_grid = gaussian_filter(dmr_grid_filled, sigma=sigma_pixels)
     dmr_grid[nan_mask] = np.nan
             
@@ -171,77 +183,121 @@ def load_dmr_grid(dmr_path, pixel_size=0.5):
 
 
 def load_dmp_grid(dmp_path, grid_x, grid_y, extent):
+    """ 
+    Načítá DMP s NÁHODNOU redukcí bodů (Random Sampling),
+    aby se předešlo pruhům ve vegetaci. Zachovává lineární interpolaci.
+    """
     print(f"Načítám DMP: {dmp_path}")
-    status_label.config(text="Načítám DMP...")
+    status_label.config(text="Načítám DMP (Random sample)...")
     root.update_idletasks()
+    
+    # Limit bodů pro rychlou lineární interpolaci
+    LOCAL_POINT_LIMIT = 1_500_000 
     
     file_ext = os.path.splitext(dmp_path)[1].lower()
     
     if file_ext in ['.las', '.laz']:        
-        las = laspy.read(dmp_path)
-        classification = np.array(las.classification)
-        mask = (classification != 7)
+        xs, ys, zs = [], [], []
         
-        if not np.any(mask):
-            raise ValueError("V DMP souboru (.las) nebyly nalezeny žádné body (kromě šumu).")
+        with laspy.open(dmp_path) as fh:
+            total_points = fh.header.point_count
             
-        points = np.vstack((las.x[mask], las.y[mask])).T
-        z = las.z[mask]
+            # Vypočítáme pravděpodobnost, s jakou bod ponecháme (např. 0.1 pro 10%)
+            # Pokud je bodů méně než limit, fraction bude 1.0 (bereme vše)
+            if total_points > 0:
+                fraction = min(1.0, LOCAL_POINT_LIMIT / total_points)
+            else:
+                fraction = 1.0
+            
+            if fraction < 1.0:
+                print(f"  -> Redukce DMP: Náhodný výběr {fraction*100:.1f}% bodů (z {total_points}).")
+            
+            # Iterace po blocích (šetří RAM)
+            for chunk in fh.chunk_iterator(1_000_000):
+                # Načtení souřadnic a klasifikace z bloku
+                # Zde musíme načíst celý blok, abychom z něj mohli náhodně vybírat
+                cx = np.array(chunk.x)
+                cy = np.array(chunk.y)
+                cz = np.array(chunk.z)
+                cc = np.array(chunk.classification)
+                
+                # 1. Maska platných bodů (odfiltrování šumu - class 7)
+                valid_mask = (cc != 7)
+                
+                # 2. Náhodná maska pro redukci
+                if fraction < 1.0:
+                    # Vygenerujeme náhodná čísla 0-1 pro celý blok
+                    # Pokud je číslo menší než fraction, bod bereme
+                    random_mask = np.random.rand(len(cx)) < fraction
+                    # Kombinujeme obě masky (musí být platný AND náhodně vybraný)
+                    final_mask = valid_mask & random_mask
+                else:
+                    final_mask = valid_mask
+
+                # Pokud po filtraci něco zbylo, uložíme to
+                if np.any(final_mask):
+                    xs.append(cx[final_mask])
+                    ys.append(cy[final_mask])
+                    zs.append(cz[final_mask])
         
-        print("Interpoluji DMP mřížku (z LAS)...")
+        if not xs: 
+            raise ValueError("V DMP nejsou platná data.")
+            
+        x = np.concatenate(xs)
+        y = np.concatenate(ys)
+        z = np.concatenate(zs)
+        
+        points = np.vstack((x, y)).T
+        
+        print(f"Interpoluji DMP mřížku (Linear, {len(points)} bodů)...")
         status_label.config(text="Interpoluji DMP mřížku...")
         root.update_idletasks()
         
-        if len(points) > MAX_GRIDDATA_POINTS:
-            print(f"  -> VAROVÁNÍ: Počet DMP bodů ({len(points)}) je příliš vysoký pro griddata.")
-            print(f"  -> Redukuji počet bodů na {MAX_GRIDDATA_POINTS} (4-8 min).")
-            
-            step = int(len(points) // MAX_GRIDDATA_POINTS)
-            points = points[::step]
-            z = z[::step]
-            
-        dmp_grid = griddata(points, z, (grid_x, grid_y), method='cubic')
+        # POUŽITÍ LINEÁRNÍ INTERPOLACE
+        dmp_grid = griddata(points, z, (grid_x, grid_y), method='linear')
         
+        # Fallback na nearest pro okraje
         if np.isnan(dmp_grid).all():
-            print("Fallback (DMP-LAS): 'Cubic' selhala, zkouším 'linear'.")
-            dmp_grid = griddata(points, z, (grid_x, grid_y), method='linear')
-            
-            if np.isnan(dmp_grid).all():
-                print("Fallback (DMP-LAS): 'Linear' selhala, používám 'nearest'.")
-                dmp_grid = griddata(points, z, (grid_x, grid_y), method='nearest')
+             print("  -> Linear selhal, používám nearest.")
+             dmp_grid = griddata(points, z, (grid_x, grid_y), method='nearest')
             
     elif file_ext in ['.tif', '.tiff']:
-        print("Detekován GeoTIFF, čtu data...")
+        # U TIFu random sampling neděláme, tam je resampling (zmenšení rozlišení)
+        # matematicky správnější než náhodné vyzobávání pixelů.
         with rasterio.open(dmp_path) as src:
-            data = src.read(1)
+            total_pixels = src.width * src.height
+            if total_pixels > LOCAL_POINT_LIMIT:
+                scale = (LOCAL_POINT_LIMIT / total_pixels) ** 0.5
+                nw, nh = int(src.width * scale), int(src.height * scale)
+                print(f"  -> Zmenšuji TIF pro interpolaci na {nw}x{nh} (Bilinear)...")
+                data = src.read(1, out_shape=(nh, nw), resampling=Resampling.bilinear)
+                transform = src.transform * src.transform.scale(src.width / nw, src.height / nh)
+            else:
+                data = src.read(1)
+                transform = src.transform
+
             rows, cols = np.indices(data.shape)
-            xs, ys = rasterio.transform.xy(src.transform, rows.flatten(), cols.flatten())
+            xs, ys = rasterio.transform.xy(transform, rows.flatten(), cols.flatten())
             z = data.flatten()
-            nodata = src.nodata
-            if nodata is not None:
-                mask = (z != nodata)
-                xs, ys, z = np.array(xs)[mask], np.array(ys)[mask], z[mask]
-                
-            points = np.vstack((xs, ys)).T
             
-            print("Interpoluji DMP mřížku (z TIF)...")
+            if src.nodata is not None:
+                mask = (z != src.nodata)
+                x, y, z = np.array(xs)[mask], np.array(ys)[mask], z[mask]
+            else:
+                x, y = np.array(xs), np.array(ys)
+            
+            points = np.vstack((x, y)).T
+            
+            print(f"Interpoluji DMP mřížku (Linear, {len(points)} bodů)...")
             status_label.config(text="Interpoluji DMP mřížku...")
             root.update_idletasks()
             
-            if len(points) > MAX_GRIDDATA_POINTS:
-                print(f"  -> VAROVÁNÍ: Počet DMP-TIF bodů ({len(points)}) je příliš vysoký pro griddata.")
-                print(f"  -> Redukuji počet bodů na {MAX_GRIDDATA_POINTS} (krokové prořezání).")
-                
-                step = int(len(points) // MAX_GRIDDATA_POINTS)
-                points = points[::step]
-                z = z[::step]
-                
             dmp_grid = griddata(points, z, (grid_x, grid_y), method='linear')
             if np.isnan(dmp_grid).all():
-                print("Fallback (DMP-TIF): Lineární interpolace selhala, používám 'nearest'.")
                 dmp_grid = griddata(points, z, (grid_x, grid_y), method='nearest')
+
     else:
-        raise ValueError(f"Nepodporovaný formát DMP: '{file_ext}'. Použijte .las, .tif nebo .tiff.")
+        raise ValueError(f"Nepodporovaný formát DMP: {file_ext}")
         
     return dmp_grid
 
@@ -374,7 +430,7 @@ def add_contour_lines(ax, grid_x, grid_y, dmr_grid_unclipped, smoothing_s=2, cli
     plot_lines(ax, grid_x, grid_y, dmr_grid_combined, minor_levels, 'sym103', zorder=25, smooth_factor=smoothing_s)
 
 
-def vectorize_rocks(grid_x, grid_y, dmr_grid, transform, slope_threshold_deg=30): #sklon/2!!!
+def vectorize_rocks(grid_x, grid_y, dmr_grid, transform, slope_threshold_deg=28): #sklon/2!!!
     """ Simplifies and vectorises polygon representation of rocks """ 
     print("Vektorizuji skály...")
     status_label.config(text="Vektorizuji skály...")
@@ -437,9 +493,9 @@ def vectorize_rocks(grid_x, grid_y, dmr_grid, transform, slope_threshold_deg=30)
         status_label.config(text="Zjednodušuji polygony (Skály)...")
         root.update_idletasks()
         
-        gdf.geometry = gdf.geometry.buffer(0.2)
+        gdf.geometry = gdf.geometry.buffer(0.3)
         
-        gdf.geometry = gdf.geometry.simplify(0.7, preserve_topology=True) 
+        gdf.geometry = gdf.geometry.simplify(0.6, preserve_topology=True) 
             
         print("  -> Zjednodušení PŘED spojením hotovo.")
         print("Spojuji polygony podle třídy (Dissolve)...")
@@ -796,21 +852,43 @@ def smooth_line(line, s, k):
 
 
 def vectorize_vegetation(classified_raster_raw, class_names, transform, dmr_path, save_gpkg=False):
-    """ Converts input raster in simplified vector layer and exports it as GPKG if asked """
+    """ Converts input raster in simplified vector layer using morphological cleaning first """
     print("Zahajuji vektorizaci rastru vegetace...")
     status_label.config(text="Vektorizuji vegetaci...")
     root.update_idletasks()
     
-    classified_raster_transposed = classified_raster_raw.T
+    # 1. Čištění rastru (Morfologické operace) - ZÁSADNÍ ZRYCHLENÍ
+    # Odstraní "sůl a pepř" (šum) a vyhladí hrany pixelů před vektorizací
+    print("  -> Předzpracování rastru...")
+    
+    # Zkopírujeme si raw data
+    cleaned_raster = classified_raster_raw.copy()
+    
+    # Pro každou třídu provedeme lehké vyhlazení
+    # Tím se zbavíme osamocených pixelů, které generují tisíce zbytečných polygonů
+    unique_classes = np.unique(cleaned_raster)
+    unique_classes = unique_classes[unique_classes != 0] # Ignorovat pozadí
+    
+    for c in unique_classes:
+        mask = (cleaned_raster == c)
+        # Opening odstraní malé tečky (šum)
+        mask = binary_opening(mask, structure=np.ones((3,3)))
+        # Closing zaplní malé díry uvnitř porostu
+        mask = binary_closing(mask, structure=np.ones((3,3)))
+        cleaned_raster[mask] = c
+        # Kde maska zmizela (byl to jen šum), nastavíme 0
+        cleaned_raster[(cleaned_raster == c) & (~mask)] = 0
+
+    # Otočení pro rasterio (stejné jako v původním kódu)
+    classified_raster_transposed = cleaned_raster.T
     classified_raster = np.flipud(classified_raster_transposed)
 
     pixel_area = abs(transform.a * transform.e)
-    min_area = 1* pixel_area
-    print(f"  -> Skenuji polygony. Plocha 1 pixelu: {pixel_area:.2f} m².")
-    print(f"  -> Minimální plocha polygonu: {min_area:.2f} m² (10 pixelů).")
+    min_area = 60 * pixel_area 
     
     mask = (classified_raster != 0)
     
+    # Generování tvarů
     try:
         results_generator = rasterio.features.shapes(
             classified_raster, 
@@ -832,38 +910,36 @@ def vectorize_vegetation(classified_raster_raw, class_names, transform, dmr_path
             print("Nebyly nalezeny žádné polygony k vektorizaci.")
             return gpd.GeoDataFrame(columns=['class_name', 'class_id', 'geometry'], crs="EPSG:5514")
 
-        print(f"Nalezeno {len(features)} hrubých polygonů, vytvářím GeoDataFrame...")
+        print(f"Nalezeno {len(features)} hrubých polygonů.")
         gdf = gpd.GeoDataFrame(features, crs="EPSG:5514")
         original_crs = gdf.crs
 
-        print(f"  -> Filtruji malé polygony porostu (menší než {min_area:.2f} m²)...")
-        print("     (Ponechávám všechny 'Paseky' a 'Louky' bez ohledu na velikost)")
-        original_count = len(gdf)
-        is_small = gdf.geometry.area < min_area
-        is_filterable_class = gdf['class_name'].isin([
-            'Nizky_porost', 'Stredni_porost', 
-            'Vysoky_porost', 'Les', 'Mimo_data'
-        ])
-        rows_to_remove = is_small & is_filterable_class
-        gdf = gdf[~rows_to_remove]
-        print(f"  -> Ponecháno {len(gdf)} z {original_count} polygonů.")
+        # Filtrace malých ploch
+        print(f"  -> Filtruji malé polygony...")
+        # Zrychlení: Filtrace pomocí vektorizovaného numpy, ne iterace
+        gdf = gdf[gdf.geometry.area >= min_area]
 
         if gdf.empty:
-            print("  -> Po filtrování nezbyly žádné polygony.")
             return gpd.GeoDataFrame(columns=['class_name', 'class_id', 'geometry'], crs=original_crs)
-        print("  -> Opravuji a zjednodušuji geometrie PŘED spojením (může chvíli trvat)...")
+
+        print("  -> Zjednodušuji geometrie...")
         status_label.config(text="Zjednodušuji polygony...")
         root.update_idletasks()
         
-        gdf.geometry = gdf.geometry.buffer(0)
+        # 2. OPTIMALIZACE VEKTOROVÝCH OPERACÍ
+        # simplify bez topologie (rychlé odstranění "schodů" z rastru)
+        gdf.geometry = gdf.geometry.simplify(0.5, preserve_topology=False)
         
-        gdf.geometry = gdf.geometry.simplify(0, preserve_topology=True) 
-            
-        print("  -> Zjednodušení PŘED spojením hotovo.")
-        print("Spojuji polygony podle třídy (Dissolve)...")
-        dissolved_gdf = gdf.dissolve(by='class_name', aggfunc='first')
+        # Až potom buffer (zakulatí rohy a případně spojí blízké segmenty)
+        # Buffer 0 je trik na opravu invalidních geometrií po simplify(False)
+        gdf.geometry = gdf.geometry.buffer(2).buffer(0)
         
-        dissolved_gdf = dissolved_gdf.reset_index()
+        print("  -> Spojuji polygony (Dissolve)...")
+        # Dissolve je teď mnohem rychlejší, protože vstupní geometrie jsou jednodušší
+        dissolved_gdf = gdf.dissolve(by='class_name', aggfunc='first').reset_index()
+        
+        # Finální jemné zjednodušení už na spojených datech (s topologií, aby to vypadalo hezky)
+        dissolved_gdf.geometry = dissolved_gdf.geometry.simplify(0.3, preserve_topology=True)
 
         dissolved_gdf = gpd.GeoDataFrame(
             dissolved_gdf, 
@@ -942,7 +1018,7 @@ def plot_masked(sym_key, zorder, mask, gdf, ax, to_mask=True):
                       'hatchwidth', 'hatchstyle', 'd', 'path_d']
         for key in clean_keys:
             sym_props.pop(key, None)
-        
+
         # Iterujeme přes geometrie a vkládáme SVG značky
         for geom in subset.geometry:
             # Získáme seznam souřadnic (x, y)
@@ -1101,7 +1177,7 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs):
     mask_gravel1 = (
         (natural == "blockfield")
     )   
-    #TODO: plot_masked(sym_key='sym209', zorder=18, mask=mask_gravel1, gdf=gdf_polygons, ax=ax)
+    plot_masked(sym_key='sym209', zorder=18, mask=mask_gravel1, gdf=gdf_polygons, ax=ax)
     # gravel 2
     mask_gravel2 = (
         (natural == "scree")
@@ -1159,7 +1235,7 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs):
         pass
     else:
         mask_water_deep = (
-            (natural.isin(["lake", "water", "canal"])) | (water.isin(["lake", "river", "basin", "bay"])) | (landuse == "basin") | (leisure == "swimming_pool")
+            (natural.isin(["lake", "water", "canal"])) | (water.isin(["lake", "river", "basin", "bay", "reservoir"])) | (landuse == "basin") | (leisure == "swimming_pool")
         )
         plot_masked(sym_key='sym301', zorder=25, mask=mask_water_deep, gdf=gdf_polygons, ax=ax)
     # water_shallow
@@ -1182,26 +1258,26 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs):
         plot_masked(sym_key='sym306', zorder=26, mask=mask_drain, gdf=gdf_lines, ax=ax)
     # wetland1
     if "Raseliniste" in zabaged_gdfs:
-        plot_masked(sym_key='sym307', zorder=28, mask=None, gdf=zabaged_gdfs["Raseliniste"], ax=ax, to_mask=False)
+        plot_masked(sym_key='sym307', zorder=25, mask=None, gdf=zabaged_gdfs["Raseliniste"], ax=ax, to_mask=False)
     else:
         mask_wetland1 = (
             (wetland == "reedbed")
         )
-        plot_masked(sym_key='sym307', zorder=28, mask=mask_wetland1, gdf=gdf_polygons, ax=ax)
+        plot_masked(sym_key='sym307', zorder=25, mask=mask_wetland1, gdf=gdf_polygons, ax=ax)
     # wetland2
     if "BazinaMocal" in zabaged_gdfs:
-        # TODO: plot_masked(sym_key='sym308', zorder=28, mask=None, gdf=zabaged_gdfs["BazinaMocal"], ax=ax, to_mask=False)
+        plot_masked(sym_key='sym308', zorder=25, mask=None, gdf=zabaged_gdfs["BazinaMocal"], ax=ax, to_mask=False)
         pass
     else:
         mask_wetland2 = (
             (natural == "wetland") & (~wetland.isin(["marsh", "wet_meadow", "reedbed"]))
         )
-        # TODO: plot_masked(sym_key='sym308', zorder=28, mask=mask_wetland2, gdf=gdf_polygons, ax=ax)
+        plot_masked(sym_key='sym308', zorder=25, mask=mask_wetland2, gdf=gdf_polygons, ax=ax)
     # wetland3
     mask_wetland3 = (
         (wetland == "marsh") | (water == "wet_meadow")
     )
-    plot_masked(sym_key='sym310', zorder=28, mask=mask_wetland3, gdf=gdf_polygons, ax=ax)
+    plot_masked(sym_key='sym310', zorder=25, mask=mask_wetland3, gdf=gdf_polygons, ax=ax)
     # well
     mask_well = (
         (man_made == "water_well") | (amenity == "fountain") | (natural == "geysyer") |
@@ -1256,13 +1332,13 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs):
     # alley
     zabaged_layer = "LiniovaVegetace"
     if zabaged_layer in zabaged_gdfs:
-        # TODO: plot_masked(sym_key='sym406', zorder=19, mask=mask_vineyard, gdf=zabaged_gdfs[zabaged_layer], ax=ax, to_mask=False)
+        plot_masked(sym_key='sym408l', zorder=19, mask=None, gdf=zabaged_gdfs["LiniovaVegetace"], ax=ax, to_mask=False)
         pass
     else:
         mask_alley = (
             (natural == "tree_row")
         )
-        plot_masked(sym_key='sym406', zorder=99, mask=mask_alley, gdf=gdf_polygons, ax=ax)
+        plot_masked(sym_key='sym408l', zorder=99, mask=mask_alley, gdf=gdf_polygons, ax=ax)
     # field
     if "OrnaPuda" in zabaged_gdfs:
         plot_masked(sym_key='sym412', zorder=1.9, mask=None, gdf=zabaged_gdfs["OrnaPuda"], ax=ax, to_mask=False)
@@ -1291,7 +1367,7 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs):
     # vegetation_change
     zabaged_layer = "HraniceUzivaniPudy"
     if zabaged_layer in zabaged_gdfs:
-        plot_masked(sym_key='sym416', zorder=22, mask=mask_vineyard, gdf=zabaged_gdfs[zabaged_layer], ax=ax, to_mask=False)
+        plot_masked(sym_key='sym416', zorder=22, mask=None, gdf=zabaged_gdfs["HraniceUzivaniPudy"], ax=ax, to_mask=False)
     # tree
     if "VyznacnyStrom" in zabaged_gdfs and zabaged_gdfs["VyznacnyStrom"] is not None:
         plot_masked(sym_key='sym417a', zorder=54, mask=None, gdf=zabaged_gdfs["VyznacnyStrom"], ax=ax, to_mask=False)
@@ -1508,16 +1584,18 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs):
 
     #TODO: ZABAGED Most (ale neklasifikovaný na dálnice, silnice, železnice atd.) ... nevím, jestli je to k něčemu použitelné vůbec
 
-    # TUNNELS ======================================================================
+    # TUNNELS ================================= VUBEC NERESIT !!! =====================================
     # tunnel
     if "Tunel" in zabaged_gdfs:
-        plot_masked(sym_key='sym512T', zorder=23, mask=None, gdf=zabaged_gdfs["Tunel"], ax=ax, to_mask=False)
+        #plot_masked(sym_key='sym512T', zorder=23, mask=None, gdf=zabaged_gdfs["Tunel"], ax=ax, to_mask=False)
+        pass
     else:
         mask_tunnel = (
             ((highway.fillna("") != "") | (railway.fillna("") != "") | (waterway.fillna("") != ""))  &
             (tunnel.isin(["yes", "avalanche_protector", "building_passage", "covered", "cave"]))
         )
-        plot_masked(sym_key='sym512T', zorder=23, mask=mask_tunnel, gdf=gdf_lines, ax=ax)
+        #plot_masked(sym_key='sym512T', zorder=23, mask=mask_tunnel, gdf=gdf_lines, ax=ax)
+        pass
 
     # POWER LINES ======================================================================
     # cable_low
@@ -1538,10 +1616,10 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs):
     # cable_tower
     if "StozarElektrickehoVedeni" in zabaged_gdfs:
         pass
-        # TODO: plot_masked(sym_key='sym511P', zorder=70, mask=None, gdf=zabaged_gdfs["StozarElektrickehoVedeni"], ax=ax, to_mask=False)
+        plot_masked(sym_key='sym511P', zorder=70, mask=None, gdf=zabaged_gdfs["StozarElektrickehoVedeni"], ax=ax, to_mask=False)
     if "StozarLanoveDrahy" in zabaged_gdfs:
         pass
-        # TODO: plot_masked(sym_key='sym511P', zorder=70, mask=None, gdf=zabaged_gdfs["StozarLanoveDrahy"], ax=ax, to_mask=False)
+        plot_masked(sym_key='sym511P', zorder=70, mask=None, gdf=zabaged_gdfs["StozarLanoveDrahy"], ax=ax, to_mask=False)
     if "StozarElektrickehoVedeni" not in zabaged_gdfs and "StozarLanoveDrahy" not in zabaged_gdfs:
         mask_cable_tower = (
             (aerialway == "pylon") | (man_made == "utility_pole") | (power == "tower")
@@ -1626,6 +1704,9 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs):
     if "PovrchovaTezbaLom" in zabaged_gdfs:
         plot_masked(sym_key='sym520', zorder=19, mask=None, gdf=zabaged_gdfs["PovrchovaTezbaLom"], ax=ax, to_mask=False)
         gardens_not_from_zabaged = False
+    if "ArealUceloveZastavby" in zabaged_gdfs:
+        plot_masked(sym_key='sym520', zorder=19, mask=None, gdf=zabaged_gdfs["ArealUceloveZastavby"], ax=ax, to_mask=False)
+        gardens_not_from_zabaged = False    
     if "Skladka" in zabaged_gdfs:
         plot_masked(sym_key='sym520', zorder=19, mask=None, gdf=zabaged_gdfs["Skladka"], ax=ax, to_mask=False)
         gardens_not_from_zabaged = False
@@ -1691,30 +1772,35 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs):
         plot_masked(sym_key='sym524b', zorder=56, mask=mask_tower_high, gdf=gdf_centroids, ax=ax)
     # tower_low
     if "VezovitaStavba" in zabaged_gdfs:
-        # TODO: plot_masked(sym_key='sym525', zorder=56, mask=None, gdf=zabaged_gdfs["VezovitaStavba"].assign(geometry=lambda x: x.geometry.centroid), ax=ax, to_mask=False)
+        plot_masked(sym_key='sym525', zorder=56, mask=None, gdf=zabaged_gdfs["VezovitaStavba"].assign(geometry=lambda x: x.geometry.centroid), ax=ax, to_mask=False)
         pass
     else:
         mask_tower_low = (
             (man_made.isin(["column", "beacon", "lighthouse"])) |
             (amenity == "hunting_stand") | (building == "clock_tower")                                               
         )
-        #TODO: plot_masked(sym_key='sym525', zorder=56, mask=mask_tower_low, gdf=gdf_centroids), ax=ax)
+        plot_masked(sym_key='sym525', zorder=56, mask=mask_tower_low, gdf=gdf_centroids, ax=ax)
     # memorial
-    if "BodPolohovehoBodovehoPole" in zabaged_gdfs:
-        # TODO: plot_masked(sym_key='sym526', zorder=56, mask=None, gdf=zabaged_gdfs["BodPolohovehoBodovehoPole"], ax=ax, to_mask=False)
+    if "BodPolohovehoBodovehoPole" in zabaged_gdfs: #Tohle se pro OB nemapuje
+        #plot_masked(sym_key='sym526a', zorder=56, mask=None, gdf=zabaged_gdfs["BodPolohovehoBodovehoPole"], ax=ax, to_mask=False)
+        #plot_masked(sym_key='sym526b', zorder=56, mask=None, gdf=zabaged_gdfs["BodPolohovehoBodovehoPole"], ax=ax, to_mask=False)
         pass
-    if "BodZakladnihoTihovehoBodovehoPole" in zabaged_gdfs:
-        # TODO: plot_masked(sym_key='sym526', zorder=56, mask=None, gdf=zabaged_gdfs["BodZakladnihoTihovehoBodovehoPole"], ax=ax, to_mask=False)
+    if "BodZakladnihoTihovehoBodovehoPole" in zabaged_gdfs: #Tohle se pro OB nemapuje
+        #plot_masked(sym_key='sym526a', zorder=56, mask=None, gdf=zabaged_gdfs["BodZakladnihoTihovehoBodovehoPole"], ax=ax, to_mask=False)
+        #plot_masked(sym_key='sym526b', zorder=56, mask=None, gdf=zabaged_gdfs["BodZakladnihoTihovehoBodovehoPole"], ax=ax, to_mask=False)
         pass
     if "MohylaPomnikNahrobek" in zabaged_gdfs:
-        # TODO: plot_masked(sym_key='sym526', zorder=56, mask=None, gdf=zabaged_gdfs["MohylaPomnikNahrobek"], ax=ax, to_mask=False)
+        plot_masked(sym_key='sym526a', zorder=56, mask=None, gdf=zabaged_gdfs["MohylaPomnikNahrobek"], ax=ax, to_mask=False)
+        plot_masked(sym_key='sym526b', zorder=56, mask=None, gdf=zabaged_gdfs["MohylaPomnikNahrobek"], ax=ax, to_mask=False)
         pass
     if "BodPolohovehoBodovehoPole" not in zabaged_gdfs and "BodZakladnihoTihovehoBodovehoPole" not in zabaged_gdfs and "MohylaPomnikNahrobek" not in zabaged_gdfs:
         mask_memorial = (
-            (historic.isin(["boundary_stone", "memorial", "lighthouse"])) |
-            (man_made == "survey_point")                                              
+            (historic.isin(["boundary_stone", "memorial"])) |
+            (man_made == "survey_point") &
+            (~building.isin(["plaque"]))                                           
         )
-        #TODO: plot_masked(sym_key='sym526', zorder=56, mask=mask_memorial, gdf=gdf_centroids), ax=ax)
+        plot_masked(sym_key='sym526a', zorder=56, mask=mask_memorial, gdf=gdf_centroids, ax=ax)
+        plot_masked(sym_key='sym526b', zorder=56, mask=mask_memorial, gdf=gdf_centroids, ax=ax)
     # pipe
     if "DalkovyProduktovodDalkovePotrubi" in zabaged_gdfs:
         # TODO: plot_masked(sym_key='sym528', zorder=56, mask=None, gdf=zabaged_gdfs["DalkovyProduktovodDalkovePotrubi"], ax=ax, to_mask=False)
@@ -1726,7 +1812,8 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs):
         mask_pipe = (
             (man_made.isin(["goods_conveyor", "pipeline"]))                                              
         )
-        #TODO: plot_masked(sym_key='sym528', zorder=56, mask=mask_pipe, gdf=gdf_lines, ax=ax)
+        #plot_masked(sym_key='sym528', zorder=56, mask=mask_pipe, gdf=gdf_lines, ax=ax)
+        pass
     # circle
     if "Bunkr" in zabaged_gdfs:
         plot_masked(sym_key='sym523', zorder=56, mask=None, gdf=zabaged_gdfs["Bunkr"], ax=ax, to_mask=False)
@@ -1738,18 +1825,20 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs):
         plot_masked(sym_key='sym523', zorder=56, mask=mask_circle, gdf=gdf_centroids, ax=ax)
     # cross
     if "KrizSloupKulturnihoVyznamu" in zabaged_gdfs:
-        # TODO: plot_masked(sym_key='sym531', zorder=56, mask=None, gdf=zabaged_gdfs["KrizSloupKulturnihoVyznamu"], ax=ax, to_mask=False)
+        plot_masked(sym_key='sym531', zorder=56, mask=None, gdf=zabaged_gdfs["KrizSloupKulturnihoVyznamu"], ax=ax, to_mask=False)
         pass
     else:
         mask_cross = (
             (man_made == "cross")                                               
         )
-        #TODO: plot_masked(sym_key='sym531', zorder=56, mask=mask_cross, gdf=gdf_centroids, ax=ax)
+        plot_masked(sym_key='sym531', zorder=56, mask=mask_cross, gdf=gdf_centroids, ax=ax)
     # stairs
     mask_stairs = (
         (highway == "steps")                                               
     )
-    #TODO: plot_masked(sym_key='sym532', zorder=49, mask=mask_stairs, gdf=gdf_lines, ax=ax)
+    plot_masked(sym_key='sym532a', zorder=49, mask=mask_stairs, gdf=gdf_lines, ax=ax)
+    plot_masked(sym_key='sym532b', zorder=50, mask=mask_stairs, gdf=gdf_lines, ax=ax)
+    plot_masked(sym_key='sym532c', zorder=51, mask=mask_stairs, gdf=gdf_lines, ax=ax);
 
     # if not power_towers.empty:
     #     symbol_id = 'power_tower'
@@ -2302,7 +2391,7 @@ def run_main_analysis():
 
 print("--- OMapMaker v5: Spouštím GUI ---")
 SCALE = 15000 
-MAX_GRIDDATA_POINTS = 5_000_000
+MAX_GRIDDATA_POINTS = 2_500_000
 SYMBOL_LIBRARY = {} 
 print("--- Vytvářím GUI ---")
 
@@ -2379,15 +2468,15 @@ bin_entry_1.insert(0, "1")
 bin_entry_1.grid(row=0, column=1, sticky="ew", padx=5, pady=5)
 ttk.Label(classify_frame, text="Vegetation: fight").grid(row=1, column=0, sticky="w", padx=5, pady=5)
 bin_entry_2 = ttk.Entry(classify_frame)
-bin_entry_2.insert(0, "2")
+bin_entry_2.insert(0, "1.3")
 bin_entry_2.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
 ttk.Label(classify_frame, text="Vegetation: walk").grid(row=2, column=0, sticky="w", padx=5, pady=5)
 bin_entry_3 = ttk.Entry(classify_frame)
-bin_entry_3.insert(0, "5")
+bin_entry_3.insert(0, "6")
 bin_entry_3.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
 ttk.Label(classify_frame, text="Vegetation: slow running").grid(row=3, column=0, sticky="w", padx=5, pady=5)
 bin_entry_4 = ttk.Entry(classify_frame)
-bin_entry_4.insert(0, "11")
+bin_entry_4.insert(0, "12")
 bin_entry_4.grid(row=3, column=1, sticky="ew", padx=5, pady=5)
 ttk.Label(classify_frame, text="Formát výstupu:").grid(row=4, column=0, sticky="w", padx=5, pady=(15, 5))
 paper_format_combo = ttk.Combobox(
@@ -2397,9 +2486,9 @@ paper_format_combo = ttk.Combobox(
     state="readonly" 
 )
 paper_format_combo.grid(row=4, column=1, sticky="ew", padx=5, pady=(15, 5))
-paper_format_combo.set(paper_format_options[2]) # Výchozí hodnota A4
+paper_format_combo.set(paper_format_options[3]) # Výchozí hodnota A4
 ttk.Label(classify_frame, text="Měřítko mapy:").grid(row=6, column=0, sticky="w", padx=5, pady=5)
-scale_var = tk.StringVar(value="1:15 000") # Výchozí hodnota
+scale_var = tk.StringVar(value="1:10 000") # Výchozí hodnota
 scale_combo = ttk.Combobox(
     classify_frame,
     textvariable=scale_var,
