@@ -1,9 +1,0 @@
-ZABAGED, 	ISOM_name
-VodniTok,	WaterCourse
-VodniPlocha,	Lake
-BazinaMoal,	Marsh
-SilniceDalnice,	MajorRoad
-Pesina,		SmallFootpath
-Cesty,		VehicleTrack
-LesniPrusek,	NarrowRide
-	
