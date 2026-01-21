@@ -10,7 +10,7 @@
 
 4) Zatím je možné ladit jen vášku vykreslované vegetace a vybrat měřítko (pokud je vybrán extent, použije se 1 : 10 000 a velikosti symbolů nesedí).
 
-### Data ZABAGED©
+### **Data ZABAGED©**
 Pokud chcete pracovat s daty ze ZABAGED©, nejjednodušší je si stáhnout celou databázi [tady]([url](https://geoportal.cuzk.cz/(S(p5s5o0ytsichpi2q2qzdlt30))/Default.aspx?mode=TextMeta&text=dSady_zabaged&side=zabaged&menu=24))
 Po stažení stačí nahrát do QGIS a exportovat do SHP tímto skriptem:
   
