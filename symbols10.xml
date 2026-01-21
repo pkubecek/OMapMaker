@@ -108,8 +108,14 @@
     <symbol id="sym404" type="area">
         <style facecolor="#f7f2c2" edgecolor="none" linewidth="0" linestyle="solid" dotdistance="2.97675" dotsize="6" dotcolor="#ffffff" />
     </symbol>
-    <symbol id="sym412" type="area">
-        <style facecolor="#ffba35" edgecolor="#000000" linewidth="0.55065" linestyle="solid" dotdistance="3.4023" dotsize="0.8505" dotcolor="#000000" />
+    <symbol id="sym408l" type="line">
+        <style color="#0e990e" linewidth="1.27575"/>
+    </symbol>
+    <symbol id="sym412a" type="area">
+        <style facecolor="#ffba35" linestyle="solid" dotdistance="3.4023" dotsize="0.8505" dotcolor="#000000" />
+    </symbol>
+    <symbol id="sym412b" type="area">
+        <style facecolor="none" edgecolor="#000000" linewidth="0.55065" linestyle="solid"/>
     </symbol>
     <symbol id="sym413" type="area">
         <style facecolor="#ffba35" edgecolor="none" linewidth="0" linestyle="solid" dotdistance="6" dotsize="2.5515" dotcolor="#3dff17" />
@@ -117,8 +123,11 @@
     <symbol id="sym414" type="area">
         <style facecolor="#ffba35" edgecolor="none" linewidth="0" linestyle="solid" hatchcolor="#3dff17" hatchdistance="3.615" hatchwidth="0.85065" hatchstyle="(0, (5.52885, 2.5518))" />
     </symbol>
-    <symbol id="sym309" type="line">
-        <style color="#000000" linewidth="0.59535" linestyle="(0, (0.8505, 1.701))" solid_capstyle="round" />
+    <symbol id="sym416p" type="area">
+        <style facecolor="none" edgecolor="#0e990e" linewidth="0.59535" linestyle="(0, (1.27575, 0.8505))" />
+    </symbol>
+    <symbol id="sym416l" type="line">
+        <style color="#0e990e" linewidth="0.59535" linestyle="(0, (1.27575, 0.8505))" />
     </symbol>
     <symbol id="sym417a" type="point">
         <path d="M 4.25 0 A 4.25 4.25 0 0 4.25 -4.25 0 A 4.25 4.25 0 0 4.25 4.25 0 Z" />
@@ -280,5 +289,8 @@
     </symbol>
     <symbol id="sym532c" type="line">
         <style color="#000000" linewidth="1.65" linestyle="(0, (0.22525, 0.351))"/>
+    </symbol>
+    <symbol id="sym601" type="line">
+        <style color="#21d1ff" linewidth="0.5103" linestyle="solid" />
     </symbol>
 </root>
