@@ -19,12 +19,15 @@ from matplotlib.patches import PathPatch, Polygon as MplPolygon
 import geopandas as gpd
 from shapely.geometry import LineString, MultiLineString, Polygon, MultiPolygon, box, shape, Point, MultiPoint
 from shapely.ops import unary_union, shape
-#import fiona
+from shapely import affinity
+import fiona
 import osmnx as ox
 from pyproj import Transformer, CRS
 import pandas as pd
 #import math
 from PIL import Image
+import skimage
+from skimage import measure
 import os
 
 CURRENT_CRS = "EPSG:5514"
@@ -109,8 +112,7 @@ def load_symbol_library(xml_file_path):
     
 def load_dmr_grid(dmr_path, target_crs_code, pixel_size=0.5):
     """ 
-    Načte body země, a pokud se cílové CRS liší od zdroje, provede transformaci souřadnic.
-    Obsahuje redukci bodů a normalizaci souřadnic pro stabilní interpolaci.
+    Načte DMR, rozšíří rastr o 10 px a okraje vyplní hodnotou nejbližšího bodu (extrapolace).
     """
     print(f"Načítám DMR s pixelem {pixel_size} m: {dmr_path}")
     print(f"  -> Cílový systém: {target_crs_code}")
@@ -161,7 +163,16 @@ def load_dmr_grid(dmr_path, target_crs_code, pixel_size=0.5):
     
     print(f"  -> Načteno {len(x)} bodů DMR.")
     
-    extent = (x.min(), x.max(), y.min(), y.max())
+    # --- 1. ROZŠÍŘENÍ EXTENTU (PADDING) ---
+    buffer_pixels = 1
+    buffer_dist = buffer_pixels * pixel_size
+    
+    min_x, max_x = x.min() - buffer_dist, x.max() + buffer_dist
+    min_y, max_y = y.min() - buffer_dist, y.max() + buffer_dist
+    
+    extent = (min_x, max_x, min_y, max_y)
+    print(f"  -> Rozsah rozšířen o {buffer_dist}m (protažení okrajů).")
+    
     grid_x, grid_y = np.mgrid[extent[0]:extent[1]:pixel_size, 
                               extent[2]:extent[3]:pixel_size]
     
@@ -171,44 +182,40 @@ def load_dmr_grid(dmr_path, target_crs_code, pixel_size=0.5):
     
     points = np.vstack((x, y)).T
     
-    # --- 1. REDUKCE BODŮ ---
+    # --- 2. REDUKCE BODŮ ---
     MAX_POINTS_DMR = 1_500_000
     if len(points) > MAX_POINTS_DMR:
-        print(f"  -> Redukce bodů DMR pro interpolaci na {MAX_POINTS_DMR}.")
         indices = np.random.choice(len(points), MAX_POINTS_DMR, replace=False)        
         points = points[indices] 
         z = z[indices]   
 
-    # --- 2. NORMALIZACE SOUŘADNIC (Shift to Origin) ---
-    print("  -> Normalizuji souřadnice před interpolací...")
+    # --- 3. NORMALIZACE SOUŘADNIC ---
     shift_x = np.mean(points[:, 0])
     shift_y = np.mean(points[:, 1])
-
     points_shifted = points - np.array([shift_x, shift_y])
-    
-    # Musíme posunout i cílovou mřížku
     grid_x_shifted = grid_x - shift_x
     grid_y_shifted = grid_y - shift_y
-    # --------------------------------------------------
 
-    dmr_grid_interpolated = griddata(points_shifted, z, (grid_x_shifted, grid_y_shifted), method='cubic')
+    # --- 4. INTERPOLACE (Cubic + Nearest Fill) ---
+    # a) Cubic - kvalitní uvnitř, ale NaN na okrajích (bufferu)
+    print("  -> Metoda Cubic (vnitřek)...")
+    dmr_grid = griddata(points_shifted, z, (grid_x_shifted, grid_y_shifted), method='cubic')
     
-    if np.isnan(dmr_grid_interpolated).all():
-        print("  -> Cubic selhal, zkouším Linear...")
-        dmr_grid_interpolated = griddata(points_shifted, z, (grid_x_shifted, grid_y_shifted), method='linear')
-        if np.isnan(dmr_grid_interpolated).all():
-            print("  -> Linear selhal, používám Nearest...")
-            dmr_grid_interpolated = griddata(points_shifted, z, (grid_x_shifted, grid_y_shifted), method='nearest')
+    # b) Zkontrolujeme, kde jsou NaN (okraje bufferu + díry)
+    nan_mask = np.isnan(dmr_grid)
     
-    nan_mask = np.isnan(dmr_grid_interpolated)
-    valid_mean = np.nanmean(dmr_grid_interpolated)
-    if np.isnan(valid_mean): valid_mean = 0 
+    if np.any(nan_mask):
+        print("  -> Metoda Nearest (vyplnění okrajů/děr)...")
+        # c) Nearest - "protáhne" hodnoty nejbližších bodů do stran
+        dmr_nearest = griddata(points_shifted, z, (grid_x_shifted, grid_y_shifted), method='nearest')
         
-    dmr_grid_filled = np.nan_to_num(dmr_grid_interpolated, nan=valid_mean)
+        # d) Sloučení: Kde Cubic selhal (NaN), tam dáme Nearest
+        dmr_grid[nan_mask] = dmr_nearest[nan_mask]
     
-    sigma_pixels = 5
-    dmr_grid = gaussian_filter(dmr_grid_filled, sigma=sigma_pixels)
-    dmr_grid[nan_mask] = np.nan
+    # --- 5. VYHLAZENÍ ---
+    # Lehké vyhlazení, aby přechod mezi Cubic a Nearest nebyl ostrý
+    sigma_pixels = 5 # Nebo méně, pokud chceš ostřejší terén
+    dmr_grid = gaussian_filter(dmr_grid, sigma=sigma_pixels)
             
     return dmr_grid, grid_x, grid_y, extent, points, z
 
@@ -221,7 +228,7 @@ def load_dmp_grid(dmp_path, grid_x, grid_y, extent, target_crs_code):
     print(f"Načítám DMP: {dmp_path}")
     status_label.config(text="Načítám DMP (Random sample)...")
     root.update_idletasks()
-    MAX_POINTS_DMR = 1_500_000 
+    MAX_POINTS_DMP = 1_500_000 
     file_ext = os.path.splitext(dmp_path)[1].lower()
     
     if file_ext in ['.las', '.laz']:        
@@ -244,7 +251,7 @@ def load_dmp_grid(dmp_path, grid_x, grid_y, extent, target_crs_code):
 
             total_points = fh.header.point_count
             if total_points > 0:
-                fraction = min(1.0, MAX_POINTS_DMR / total_points)
+                fraction = min(1.0, MAX_POINTS_DMP / total_points)
             else:
                 fraction = 1.0
             
@@ -306,8 +313,8 @@ def load_dmp_grid(dmp_path, grid_x, grid_y, extent, target_crs_code):
         print("⚠️ Upozornění: GeoTIFF DMP se automaticky netransformuje. Musí být ve zvoleném CRS!")
         with rasterio.open(dmp_path) as src:
             total_pixels = src.width * src.height
-            if total_pixels > MAX_POINTS_DMR:
-                scale = (MAX_POINTS_DMR / total_pixels) ** 0.5
+            if total_pixels > MAX_POINTS_DMP:
+                scale = (MAX_POINTS_DMP / total_pixels) ** 0.5
                 nw, nh = int(src.width * scale), int(src.height * scale)
                 print(f"  -> Zmenšuji TIF pro interpolaci na {nw}x{nh} (Bilinear)...")
                 data = src.read(1, out_shape=(nh, nw), resampling=Resampling.bilinear)
@@ -346,220 +353,149 @@ def load_dmp_grid(dmp_path, grid_x, grid_y, extent, target_crs_code):
         
     return dmp_grid
 
-
-def plot_lines(ax, grid_x, grid_y, data_grid, levels, style_id, zorder=25, smooth_factor=1):
-    """ Plots generated contour lines with custom zorder """
+def generate_and_plot_contours(ax, padded_grid, levels, style_id, zorder, transform_info, clip_box):
     style = SYMBOL_LIBRARY.get(style_id)
-    if not style or style["type"] != 'line':
-        print(f"Styl '{style_id}' nenalezen, použije se nouzový.")
-        style_props = {'color': 'red', 'linewidth': 0.5, 'linestyle': ':'}
-    else:
-        style_props = style["props"].copy()
+    if not style:
+        return
 
-    contour_props = {
-        'colors': style_props.get('color'),
-        'linewidths': style_props.get('linewidth'),
-        'linestyles': style_props.get('linestyle')
-    }
-    contour_props = {k: v for k, v in contour_props.items() if v is not None}
+    min_x, min_y, px_step_x, px_step_y, pad = transform_info
+    
+    lines = []
+    
+    for level in levels:
+        contours = measure.find_contours(padded_grid, level)
+        for contour in contours:
+            x_coords = min_x + (contour[:, 0] - pad) * px_step_x
+            y_coords = min_y + (contour[:, 1] - pad) * px_step_y
+            
+            if len(x_coords) > 2:
+                lines.append(LineString(np.column_stack((x_coords, y_coords))))
 
-    if 'linestyles' in contour_props and isinstance(contour_props['linestyles'], tuple):
-        contour_props.pop('linestyles')
+    if not lines:
+        return
 
-    try:
-        if np.isnan(data_grid).all():
-            return 
-
-        # Vykreslíme pomocné vrstevnice (ty se pak smažou)
-        cs = ax.contour(grid_x, grid_y, data_grid, levels=levels, **contour_props)
+    gdf = gpd.GeoDataFrame(geometry=lines, crs=CURRENT_CRS)
+    
+    if clip_box is not None:
+        gdf = gpd.clip(gdf, clip_box)
         
-        if not hasattr(cs, 'collections') or cs.collections is None:
-             return
-
-        for collection in cs.collections:
-            paths = collection.get_paths()
-            processed_segments = [] 
-            
-            for path in paths:
-                verts = path.vertices
-                num_verts = len(verts)
-                
-                if num_verts > 1:
-                    # Filtrujeme příliš krátké čáry
-                    diffs = np.diff(verts, axis=0)
-                    total_length = np.sum(np.hypot(diffs[:, 0], diffs[:, 1]))
-                    
-                    if total_length >= 10.0: # Sníženo z 30 na 10 pro jistotu
-                        processed_segments.append(verts)
-            
-            # Odstraníme původní (hrubou) kolekci
-            collection.remove()
-
-            if not processed_segments:
-                continue
-
-            try:
-                # Vytvoření vektorů a jejich vykreslení ve správné vrstvě
-                lines_shapely = [LineString(segment) for segment in processed_segments]
-                # ZMĚNA ZDE: Použití CURRENT_CRS místo "EPSG:5514"
-                gdf = gpd.GeoDataFrame(geometry=lines_shapely, crs=CURRENT_CRS)
-                # ZDE se aplikuje zorder předaný parametrem
-                plot_masked(sym_key=style_id, zorder=zorder, mask=None, gdf=gdf, ax=ax, to_mask=False)
-            except Exception as e:
-                print(f"⚠️ Chyba při vektorizaci vrstevnice ({style_id}): {e}")
-            
-    except Exception as e:
-        print(f"⚠️ Kritická chyba v plot_lines ({style_id}): {e}")
-
+    if not gdf.empty:
+        plot_masked(sym_key=style_id, zorder=zorder, mask=None, gdf=gdf, ax=ax, to_mask=False)
 
 def add_contour_lines(ax, grid_x, grid_y, dmr_grid_unclipped, smoothing_s=2, clip_mask=None):
-    """ Generates contour lines from input elevation data """
     print("Kreslím vrstevnice...")
     status_label.config(text="Kreslím vrstevnice...")
     root.update_idletasks()
 
-    if clip_mask is not None:
-        print("  -> Aplikuji ořezovou masku na vrstevnice.")
-        dmr_grid_plot = np.where(clip_mask, dmr_grid_unclipped, np.nan)
-    else:
-        dmr_grid_plot = dmr_grid_unclipped # Kreslíme vše
+    # 1. TVORBA MASKY PLATNÝCH DAT
+    valid_data_mask = (dmr_grid_unclipped > 0) & (~np.isnan(dmr_grid_unclipped))
+    
+    # EROZE OKRAJŮ
+    safe_mask = binary_erosion(valid_data_mask, iterations=1)
+    
+    # Aplikujeme masku na výškový model
+    dmr_grid_plot = np.where(safe_mask, dmr_grid_unclipped, np.nan)
 
+    # 2. NASTAVENÍ GEOMETRIE
+    # Padding nastavíme na NaN, aby algoritmus neuzavíral čáry do nulových bodů
+    pad_width = 10 
+    dmr_padded = np.pad(dmr_grid_plot, pad_width=pad_width, mode='constant', constant_values=np.nan)
+
+    min_x, max_x = grid_x.min(), grid_x.max()
+    min_y, max_y = grid_y.min(), grid_y.max()
+    px_step_x = (max_x - min_x) / (grid_x.shape[0] - 1)
+    px_step_y = (max_y - min_y) / (grid_y.shape[1] - 1)
+    
+    transform_info = (min_x, min_y, px_step_x, px_step_y, pad_width)
+    original_extent_box = box(min_x, min_y, max_x, max_y)
+
+    # 3. VÝPOČET LEVELŮ (Vrstvy z dmr_grid_plot)
     min_z = np.nanmin(dmr_grid_plot)
     max_z = np.nanmax(dmr_grid_plot)
     
+    # Hlavní vrstevnice (25m) a základní (5m) dle symboliky ISOM
     major_levels = np.arange(np.floor(min_z / 25) * 25, np.ceil(max_z / 25) * 25 + 1, 25)
     base_levels = np.arange(np.floor(min_z / 5) * 5, np.ceil(max_z / 5) * 5 + 1, 5)
-    minor_levels = np.arange(np.floor(min_z / 2.5) * 2.5, np.ceil(max_z / 2.5) * 2.5 + 1, 2.5)
-    minor_levels = [lvl for lvl in minor_levels if lvl not in base_levels]
+    base_levels = np.setdiff1d(base_levels, major_levels)
 
-    # Kreslíme hlavní a základní vrstevnice z oříznuté 'dmr_grid_plot'
-    plot_lines(ax, grid_x, grid_y, dmr_grid_plot, major_levels, 'sym102', zorder=25, smooth_factor=smoothing_s)
-    plot_lines(ax, grid_x, grid_y, dmr_grid_plot, base_levels, 'sym101', zorder=25, smooth_factor=smoothing_s)
+    # 4. VYKRESLENÍ
+    generate_and_plot_contours(ax, dmr_padded, major_levels, 'sym102', 25, transform_info, original_extent_box)
+    generate_and_plot_contours(ax, dmr_padded, base_levels, 'sym101', 25, transform_info, original_extent_box)
     
-    print("  -> Počítám masku pro doplňkové vrstevnice (z plných dat)...")
-    
-    valid_data_mask = ~np.isnan(dmr_grid_unclipped)
+    # 4. MASKA PRO DOPLŇKOVÉ VRSTEVNICE (Ztracená část)
     filled_mean = np.nanmean(dmr_grid_unclipped)
-    if np.isnan(filled_mean): filled_mean = 0 
-        
     dmr_grid_calc = np.nan_to_num(dmr_grid_unclipped, nan=filled_mean)
 
-    curvature_mask = np.zeros_like(dmr_grid_calc, dtype=bool)
-    gentle_slope_mask = np.zeros_like(dmr_grid_calc, dtype=bool)
-
+    # Výpočet křivosti (curvature) pro detekci terénních tvarů
     gy, gx = np.gradient(dmr_grid_calc) 
-
     gxx, _ = np.gradient(gx)
     _, gyy = np.gradient(gy)
     curvature = np.abs(gxx + gyy)
     
-    safe_calculation_mask = binary_erosion(valid_data_mask, iterations=2)
-    
-    valid_curvature = curvature[safe_calculation_mask] 
-    if valid_curvature.size > 0:
-        curvature_threshold = np.percentile(valid_curvature, 95) 
-        curvature_mask = (curvature > curvature_threshold) & valid_data_mask
-
+    # Detekce mírných sklonů (gentle slope)
     slope = np.hypot(gx, gy)
-    valid_slope = slope[safe_calculation_mask]
-
-    if valid_slope.size > 0:
-        slope_min_threshold = np.percentile(valid_slope, 0) 
-        slope_max_threshold = np.percentile(valid_slope, 20) 
-        gentle_slope_mask = (slope > slope_min_threshold) & (slope < slope_max_threshold) & valid_data_mask
-
+    
+    curvature_threshold = np.percentile(curvature[safe_mask], 96)
+    curvature_mask = (curvature > curvature_threshold) & safe_mask
+    gentle_slope_mask = (slope < np.percentile(slope[safe_mask], 15)) & safe_mask
     combined_mask = curvature_mask | gentle_slope_mask
     dilated_mask = binary_dilation(combined_mask, iterations=10)
-    dmr_grid_combined = np.where(dilated_mask, dmr_grid_plot, np.nan)
+    dmr_grid_minor = np.where(dilated_mask, dmr_grid_plot, np.nan)
+    dmr_padded_minor = np.pad(dmr_grid_minor, pad_width=pad_width, mode='constant', constant_values=np.nan)
     
-    plot_lines(ax, grid_x, grid_y, dmr_grid_combined, minor_levels, 'sym103', zorder=25, smooth_factor=smoothing_s)
+    minor_levels = np.arange(np.floor(min_z / 2.5) * 2.5, np.ceil(max_z / 2.5) * 2.5 + 1, 2.5)
+    minor_levels = np.setdiff1d(minor_levels, np.union1d(major_levels, base_levels))
+    
+    generate_and_plot_contours(ax, dmr_padded_minor, minor_levels, 'sym103', 25, transform_info, original_extent_box)
+    
     print("✅ Vrstevnice vykresleny")
 
-def vectorize_rocks(grid_x, grid_y, dmr_grid, transform, slope_threshold_deg=28): #sklon/2!!!
-    """ Simplifies and vectorises polygon representation of rocks """ 
+def vectorize_rocks(grid_x, grid_y, dmr_grid, transform, slope_threshold_deg=28):
     print("Vektorizuji skály...")
     status_label.config(text="Vektorizuji skály...")
     root.update_idletasks()
     
+    # Výpočet sklonu
     dy, dx = np.gradient(dmr_grid)
     slope = np.rad2deg(np.arctan(np.hypot(dx, dy)))
-    rock_mask_raw = slope > slope_threshold_deg 
+
+    valid_data_mask = (dmr_grid > 0) & (~np.isnan(dmr_grid))
     
-    print("  -> Odstraňuji okrajové artefakty...")
-    valid_data_mask = (dmr_grid != 0)
-    eroded_valid_mask = minimum_filter(valid_data_mask, size=2) 
-    final_rock_mask = rock_mask_raw & eroded_valid_mask    
-    rock_area_raw = np.where(final_rock_mask, 1, 0).astype(np.int32) 
-    rock_area_transposed = rock_area_raw.T
-    rock_area = np.flipud(rock_area_transposed)
+    safe_mask = binary_erosion(valid_data_mask, iterations=7)
+    rock_mask_raw = (slope > slope_threshold_deg) & safe_mask
+    
+    rock_area = rock_mask_raw.astype(np.int32).T
+    rock_area = np.flipud(rock_area)
 
     pixel_area = abs(transform.a * transform.e)
-    min_area = 4 * pixel_area
-    print(f"  -> Skenuji polygony. Plocha 1 pixelu: {pixel_area:.2f} m².")
-    print(f"  -> Minimální plocha polygonu: {min_area:.2f} m² (10 pixelů).")
-    
-    mask = (rock_area != 0)
+    min_area = 10 * pixel_area
     
     if not np.any(rock_area):
-        print("  -> Nenalezen žádný skalní polygon.")
-        return gpd.GeoDataFrame([], crs=CURRENT_CRS)
+        return gpd.GeoDataFrame(columns=['class_name', 'geometry'], crs=CURRENT_CRS)
         
     try:
-        results_generator = rasterio.features.shapes(rock_area, mask=mask, transform=transform)
-    
+        results_generator = rasterio.features.shapes(rock_area, mask=(rock_area != 0), transform=transform)
         features = []
         for geom, value in results_generator:
-            class_id = int(value)
-            if class_id == 0: continue
-
-            features.append({'geometry': shape(geom), 'class_id': class_id, 'class_name': 'Skala'})
+            features.append({'geometry': shape(geom), 'class_name': 'Skala'})
             
         if not features:
-            print("Nebyly nalezeny žádné polygony k vektorizaci.")
-            return gpd.GeoDataFrame(columns=['class_name', 'class_id', 'geometry'], crs=CURRENT_CRS) # ZMĚNA
+            return gpd.GeoDataFrame(columns=['class_name', 'geometry'], crs=CURRENT_CRS)
 
-        print(f"Nalezeno {len(features)} hrubých polygonů, vytvářím GeoDataFrame...")
-        gdf = gpd.GeoDataFrame(features, crs="EPSG:5514")
-        original_crs = gdf.crs
-
-        print(f"  -> Filtruji malé polygony skal (menší než {min_area:.2f} m²)...")
-        original_count = len(gdf)
-        
-        is_small = gdf.geometry.area < min_area
-        gdf = gdf[~is_small]
-        
-        print(f"  -> Ponecháno {len(gdf)} z {original_count} polygonů.")
-
-        if gdf.empty:
-            print("  -> Po filtrování nezbyly žádné polygony.")
-            return gpd.GeoDataFrame(columns=['class_name', 'class_id', 'geometry'], crs=original_crs)
-
-        print("  -> Opravuji a zjednodušuji geometrie PŘED spojením (může chvíli trvat)...")
-        status_label.config(text="Zjednodušuji polygony (Skály)...")
-        root.update_idletasks()
-        
-        gdf.geometry = gdf.geometry.buffer(0.3)
-        
-        gdf.geometry = gdf.geometry.simplify(0.6, preserve_topology=True) 
-            
-        print("  -> Zjednodušení PŘED spojením hotovo.")
-        print("Spojuji polygony podle třídy (Dissolve)...")
-        dissolved_gdf = gdf.dissolve(by='class_name', aggfunc='first')
-        
-        dissolved_gdf = dissolved_gdf.reset_index()
-
-        dissolved_gdf = gpd.GeoDataFrame(dissolved_gdf, geometry='geometry', crs=original_crs)
-        
-        print(f"  -> Vytvořeno {len(dissolved_gdf)} spojených skalních polygonů.")
-        
-        return dissolved_gdf
+        gdf = gpd.GeoDataFrame(features, crs=CURRENT_CRS)
+        gdf = gdf[gdf.geometry.area >= min_area]
         print("✅ Skály vykresleny")
-    except Exception as e:
-        print(f"❌ Chyba při vektorizaci skal: {e}")
-        status_label.config(text=f"Chyba při vektorizaci skal: {e}", fg="red")
 
-        return gpd.GeoDataFrame(columns=['class_name', 'class_id', 'geometry'], crs="EPSG:5514")
-    
+        # Čištění geometrií
+        gdf.geometry = gdf.geometry.buffer(0.2).buffer(-0.1).simplify(0.5)
+        dissolved_gdf = gdf.dissolve(by='class_name').reset_index()
+
+        return dissolved_gdf
+
+    except Exception as e:
+        print(f"Chyba skal: {e}")
+        return gpd.GeoDataFrame(columns=['class_name', 'geometry'], crs=CURRENT_CRS)
+
 def add_depressions(ax, grid_x, grid_y, dmr_grid, pixel_size=0.5, min_diameter=0.5, max_diameter=3, min_depth=0.3):
     print(f"Detekuji prohlubně (pixel: {pixel_size}m, min_hloubka: {min_depth}m)...")
     status_label.config(text="Detekuji prohlubně...")
@@ -671,42 +607,32 @@ def add_depressions(ax, grid_x, grid_y, dmr_grid, pixel_size=0.5, min_diameter=0
 
 
 def add_knoll_symbols(ax, grid_x, grid_y, dmr_grid, pixel_size=0.5, min_height=0.25, max_diameter=3.0):
-    print("Detekuji kupky...")
-    status_label.config(text="Detekuji kupky...")
+    print("Kreslím kupky...")
+    status_label.config(text="Kreslím kupky...")
     root.update_idletasks()
     
     sym_key = 'sym109'
     symbol_info = SYMBOL_LIBRARY.get(sym_key)
     if not symbol_info or symbol_info['type'] != 'point':
-        print(f"Chyba: Symbol '{sym_key}' nebyl nalezen v knihovně.")
         return
     
     symbol_path = symbol_info['path']
     symbol_props = symbol_info['props'].copy()
-    
-    if sym_key == 'sym109':
-        if symbol_props.get('facecolor') == 'none':
-            symbol_props['facecolor'] = '#d15c00'
-        if symbol_props.get('linewidth') == 0:
-             symbol_props['linewidth'] = 0
-    
-    symbol_props['zorder'] = 10
-    
-    scale_factor = 1.0
-    if 'dotsize' in symbol_props:
-        symbol_props.pop('dotsize', None) 
-    
-    clean_keys = ['d', 'path_d']
-    for k in clean_keys:
-        symbol_props.pop(k, None)
-
+    valid_data_mask = (dmr_grid > 0) & (~np.isnan(dmr_grid))
+    safe_mask = binary_erosion(valid_data_mask, iterations=5)
+    # 2. ANALÝZA TERÉNU
+    # Vyhlazení pro odstranění drobného šumu
     smoothed = gaussian_filter(dmr_grid, sigma=0.1)
+    
+    # Hledání lokálních maxim v okně 5x5 pixelů
     local_max = (smoothed == maximum_filter(smoothed, size=5))
     height_reference = gaussian_filter(smoothed, sigma=2)
     height = smoothed - height_reference
     
-    knoll_mask = (local_max & (height > min_height))
+    # Kupka musí být lokální maximum, mít minimální výšku a ležet v bezpečné zóně
+    knoll_mask = (local_max & (height > min_height) & safe_mask)
     
+    # 3. VYKRESLENÍ SYMBOLŮ
     labeled, _ = label(knoll_mask)
     slices = find_objects(labeled)  
 
@@ -717,6 +643,7 @@ def add_knoll_symbols(ax, grid_x, grid_y, dmr_grid, pixel_size=0.5, min_height=0
         ny, nx = region_mask.shape
         diameter = max(ny, nx) * pixel_size
         
+        # Filtrování příliš rozsáhlých útvarů, které nejsou bodovými kupkami
         if diameter > max_diameter:
             continue
 
@@ -730,17 +657,21 @@ def add_knoll_symbols(ax, grid_x, grid_y, dmr_grid, pixel_size=0.5, min_height=0
         x0 = float(grid_x[i0, j0])
         y0 = float(grid_y[i0, j0])
 
-        transform = Affine2D().scale(scale_factor).translate(x0, y0) + ax.transData
+        # Aplikace transformace pro správné umístění symbolu
+        transform = Affine2D().scale(1.0).translate(x0, y0) + ax.transData
         
         patch = PathPatch(
             symbol_path,
             transform=transform,
-            **symbol_props
+            zorder=10,
+            facecolor=symbol_props.get('facecolor', '#d15c00'),
+            edgecolor=symbol_props.get('edgecolor', 'none'),
+            linewidth=0
         )
         ax.add_patch(patch)
         count += 1
         
-    print("✅ Kupky vykresleny")
+    print(f"✅ Kupky vykresleny")
 
 
 def pt2m(pt, SCALE=10_000):
@@ -849,32 +780,50 @@ def plot_dotted_hatch(ax, gdf, style_props, zorder):
             
             ax.scatter(x_final, y_final, marker='.', color=dot_color, s=dot_size, zorder=zorder + 0.1, edgecolors='none')
 
-def add_magnetic_north_lines(ax, extent, scale, spacing_mm=30, zorder=5):    
-    # 1. Přepočet rozestupu z mm na metry v daném měřítku
+def add_magnetic_north_lines(ax, extent, scale, rotation=0, spacing_mm=30, zorder=20):    
+    # 1. Přepočet rozestupu z mm na metry
     spacing_meters = (spacing_mm / 1000.0) * scale
     
     minx, maxx, miny, maxy = extent
     
-    # 2. Výpočet souřadnic X
-    start_x = np.floor(minx / spacing_meters) * spacing_meters
+    # Vypočteme střed a diagonálu pro dostatečné pokrytí při rotaci
+    center_x = (minx + maxx) / 2
+    center_y = (miny + maxy) / 2
+    diagonal = np.hypot(maxx - minx, maxy - miny)
+    
+    # Generujeme čáry v širším rozsahu (kvůli rotaci)
+    # Začneme od středu a jdeme na obě strany
+    num_lines = int(diagonal / spacing_meters) + 2
     
     lines = []
-    current_x = start_x
     
-    # Generování čar přes celý rozsah mapy
-    while current_x < maxx + spacing_meters:
-        if current_x >= minx:
-            line = LineString([(current_x, miny), (current_x, maxy)])
-            lines.append(line)
-        current_x += spacing_meters
+    # Generování svislých čar
+    for i in range(-num_lines, num_lines + 1):
+        x = center_x + (i * spacing_meters)
+        # Čára musí být dostatečně dlouhá, aby po otočení pokryla mapu
+        line = LineString([(x, center_y - diagonal), (x, center_y + diagonal)])
         
-    if not lines:
+        if rotation != 0:
+            line = affinity.rotate(line, -rotation, origin=(center_x, center_y))
+            
+        lines.append(line)
+        
+    # Ořezání čar na viditelný rozsah mapy (Clip)
+    map_box = box(minx, miny, maxx, maxy)
+    visible_lines = []
+    
+    for line in lines:
+        if line.intersects(map_box):
+            visible_lines.append(line.intersection(map_box))
+            
+    if not visible_lines:
         return
+
     try:
-        gdf_north = gpd.GeoDataFrame(geometry=lines, crs=CURRENT_CRS)
+        gdf_north = gpd.GeoDataFrame(geometry=visible_lines, crs=CURRENT_CRS)
         plot_masked(sym_key='sym601', zorder=zorder, mask=None, gdf=gdf_north, ax=ax, to_mask=False)
-        print(f"  -> Vykresleno {len(lines)} poledníků.")
-        
+        if 'sym601' not in SYMBOL_LIBRARY:
+             gdf_north.plot(ax=ax, color='#21d1ff', linewidth=0.35, zorder=zorder)        
     except Exception as e:
         print(f"⚠️ Chyba při kreslení poledníků: {e}")
 
@@ -1044,16 +993,13 @@ def vectorize_vegetation(classified_raster_raw, class_names, transform, dmr_path
         
         subset.plot(ax=ax, zorder=zorder, **sym_props)
 
-def plot_masked(sym_key, zorder, mask, gdf, ax, to_mask=True):
-    """ Vykreslí GDF podle stylu z XML (Upraveno pro podporu capstyle/zaoblení) """
+def plot_masked(sym_key, zorder, mask, gdf, ax, to_mask=True, dmr_grid=None, grid_x=None, grid_y=None):
     if gdf is None or gdf.empty:
         return None
 
-    # --- A. Filtrace dat ---
     if to_mask:
         if mask is None: 
             return None
-        # Ujistíme se, že maska odpovídá délce GDF
         if isinstance(mask, (pd.Series, gpd.GeoSeries)):
             mask = mask.reindex(gdf.index).fillna(False)
         
@@ -1063,19 +1009,72 @@ def plot_masked(sym_key, zorder, mask, gdf, ax, to_mask=True):
     else:
         subset = gdf.copy()
 
-    # --- B. Načtení dat symbolu ---
     sym_data = SYMBOL_LIBRARY.get(sym_key, {})
     sym_type = sym_data.get('type')
-    sym_path = sym_data.get('path') # Načtená MPL cesta
+    sym_path = sym_data.get('path') 
     sym_props = sym_data.get('props', {}).copy()
 
-    # --- FIX: OŠETŘENÍ ZAOBLEVENÍ LINIÍ (Capstyle) ---
-    # XML obsahuje 'solid_capstyle', ale matplotlib pro některé čáry (dashed)
-    # nebo objekty vyžaduje 'capstyle' nebo 'dash_capstyle'.
     if 'solid_capstyle' in sym_props:
-        val = sym_props.pop('solid_capstyle') # Načte hodnotu a smaže klíč 'solid_capstyle'
+        val = sym_props.pop('solid_capstyle')
         sym_props['capstyle'] = val
-    # --- C. Speciální výplně (Hatch/Dot) ---
+
+    cliff_ids = ['sym104', 'sym202']
+    is_cliff = sym_key in cliff_ids or 'tick_length' in sym_props
+
+    if is_cliff and dmr_grid is not None and grid_x is not None and grid_y is not None:
+        tick_len = float(sym_props.pop('tick_length', 4))
+        tick_space = float(sym_props.pop('tick_spacing', 4))
+        tick_width = float(sym_props.get('linewidth', 0.3))
+        
+        subset.plot(ax=ax, zorder=zorder, **sym_props)
+
+        grad_x, grad_y = np.gradient(dmr_grid)
+
+        min_x, max_x = grid_x.min(), grid_x.max()
+        min_y, max_y = grid_y.min(), grid_y.max()
+        px_size_x = (max_x - min_x) / (grid_x.shape[0] - 1)
+        px_size_y = (max_y - min_y) / (grid_y.shape[1] - 1)
+
+        ticks_segments = []
+
+        for geom in subset.geometry:
+            if geom is None or geom.is_empty: continue
+            
+            parts = [geom] if geom.geom_type == 'LineString' else geom.geoms
+            
+            for line in parts:
+                line_len = line.length
+                if line_len == 0: continue
+                
+                distances = np.arange(tick_space / 2, line_len, tick_space)
+                
+                for dist in distances:
+                    pt = line.interpolate(dist)
+                    
+                    ix = int((pt.x - min_x) / px_size_x)
+                    iy = int((pt.y - min_y) / px_size_y)
+                    
+                    if 0 <= ix < grad_x.shape[0] and 0 <= iy < grad_x.shape[1]:
+                        gx = grad_x[ix, iy]
+                        gy = grad_y[ix, iy]
+                        
+                        norm = np.hypot(gx, gy)
+                        
+                        if norm > 0:
+                            ux = -gx / norm
+                            uy = -gy / norm
+                            
+                            end_x = pt.x + (ux * tick_len)
+                            end_y = pt.y + (uy * tick_len)
+                            
+                            ticks_segments.append([(pt.x, pt.y), (end_x, end_y)])
+
+        if ticks_segments:
+            lc = LineCollection(ticks_segments, colors=sym_props.get('color', 'black'), 
+                                linewidths=tick_width, zorder=zorder)
+            ax.add_collection(lc)
+        return
+
     if 'hatchdistance' in sym_props:
         plot_dashed_hatch(ax, subset.dissolve(), sym_props, zorder=zorder)
         return
@@ -1083,16 +1082,13 @@ def plot_masked(sym_key, zorder, mask, gdf, ax, to_mask=True):
         plot_dotted_hatch(ax, subset.dissolve(), sym_props, zorder=zorder)
         return
 
-    # --- D. Vykreslení BODŮ pomocí SVG (PathPatch) ---
     if sym_type == 'point' and sym_path is not None:
-        # Vyčistíme props, které PatchPath nezná
         clean_keys = ['dotsize', 'dotdistance', 'dotcolor', 'marker_shape', 
                       'facecolor_alt', 'hatchdistance', 'hatchcolor', 
                       'hatchwidth', 'hatchstyle', 'd', 'path_d']
         for key in clean_keys:
             sym_props.pop(key, None)
 
-        # Iterujeme přes geometrie a vkládáme SVG značky
         for geom in subset.geometry:
             points_to_plot = []
             if geom.geom_type == 'Point':
@@ -1112,7 +1108,6 @@ def plot_masked(sym_key, zorder, mask, gdf, ax, to_mask=True):
                 ax.add_patch(patch)
         return 
 
-    # --- E. Standardní vykreslení (Linie, Polygony) ---
     clean_keys = ['dotsize', 'dotdistance', 'dotcolor', 'marker_shape', 'facecolor_alt', 
                   'hatchdistance', 'hatchcolor', 'hatchwidth', 'hatchstyle', 'd', 'path_d', 'capstyle']
     for key in clean_keys:
@@ -1140,12 +1135,14 @@ def clip_vecor_layers(gdf, extent):
         return gdf
 
 
-def add_vector_layers(ax, gdf, extent, zabaged_gdfs):
+def add_vector_layers(ax, gdf, extent, zabaged_gdfs, dmr_grid_linear_viz_features, grid_x, grid_y, visibility):
     """ 
     Kompletní vykreslování vektorových vrstev (ZABAGED + OSM).
     Obsahuje terénní tvary, vodu, vegetaci, sídla a komunikace.
     Verze: Opraveno vykreslování mostů a vedení (OSM tagy + copy-paste chyby).
-    """        
+    """  
+    if visibility is None:
+        visibility = {k: True for k in ["water", "roads", "buildings", "fences", "man_made", "vegetation"]}      
     # Oříznutí hlavního GDF a všech ZABAGED vrstev na zadaný rozsah
     gdf = clip_vecor_layers(gdf, extent)
     
@@ -1188,28 +1185,32 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs):
     # --- 2. Rozdělení na geometrické typy ---
     gdf_centroids = gdf.copy()
     gdf_centroids['geometry'] = gdf_centroids.geometry.centroid
+    gdf_points = gdf[gdf.geometry.geom_type.isin(["Point"])].copy()
     gdf_lines = gdf[gdf.geometry.geom_type.isin(["LineString", "MultiLineString"])].copy()
     gdf_polygons = gdf[gdf.geometry.geom_type.isin(["Polygon", "MultiPolygon"])].copy()
 
     # TERRAIN SHAPES ======================================================================    
     # cliff_low
     if "StupenSraz" in zabaged_gdfs:
-        # TODO: plot_masked(sym_key='sym104', zorder=20, mask=None, gdf=zabaged_gdfs["StupenSraz"], ax=ax, to_mask=False)
+        #plot_masked(sym_key="sym104", zorder=21, mask=None, gdf=zabaged_gdfs["StupenSraz"], ax=ax, to_mask=False, dmr_grid=dmr_grid_linear_viz_features, grid_x=grid_x, grid_y=grid_y)
         pass
     else:
         mask_embankment = (
         (man_made == "embankment")
     )
-    #TODO: plot_masked(sym_key='sym104', zorder=20, mask=mask_embankment, gdf=gdf_lines, ax=ax)   
+    #plot_masked(sym_key="sym202", zorder=21, mask=mask_embankment, gdf=gdf_lines, ax=ax, dmr_grid=dmr_grid_linear_viz_features, grid_x=grid_x, grid_y=grid_y)
     # groove
     if "RokleVymol" in zabaged_gdfs:
-        # TODO: plot_masked(sym_key='sym107', zorder=20, mask=None, gdf=zabaged_gdfs["RokleVymol"], ax=ax, to_mask=False)
+        #plot_masked(sym_key='sym107', zorder=20, mask=None, gdf=zabaged_gdfs["RokleVymol"], ax=ax, to_mask=False)
+        pass
+    else:
         pass
     # cliff_large
     mask_cliff_high = (
         (natural == "cliff")
     )
-    #TODO: plot_masked(sym_key='sym201', zorder=21, mask=mask_cliff_high, gdf=gdf, ax=ax)
+    #plot_masked(sym_key="sym202", zorder=21, mask=mask_cliff_high, gdf=gdf_lines, ax=ax, dmr_grid=dmr_grid_linear_viz_features, grid_x=grid_x, grid_y=grid_y)
+
     # cave
     if "VstupDoJeskyne" in zabaged_gdfs:
         # TODO: plot_masked(sym_key='sym203-1', zorder=56, mask=None, gdf=zabaged_gdfs["VstupDoJeskyne"], ax=ax, to_mask=False)
@@ -1271,693 +1272,699 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs):
     plot_masked(sym_key='sym215b', zorder=21, mask=mask_ditch, gdf=gdf_lines, ax=ax)
 
     # WATER ======================================================================
-    # river
-    if "VodniTok" in zabaged_gdfs:
-        mask = (
-            (get_col(zabaged_gdfs["VodniTok"], "typtoku_p").isin(["povrchový splavný"])) &
-            (get_col(zabaged_gdfs["VodniTok"], "vydattok_p").isin(["stálý"]))
+    if visibility.get("water", True):
+        # river
+        if "VodniTok" in zabaged_gdfs:
+            mask = (
+                (get_col(zabaged_gdfs["VodniTok"], "typtoku_p").isin(["povrchový splavný"])) &
+                (get_col(zabaged_gdfs["VodniTok"], "vydattok_p").isin(["stálý"]))
+            )
+            plot_masked(sym_key='sym304', zorder=26, mask=mask, gdf=zabaged_gdfs["VodniTok"], ax=ax)
+        if "PozemniNadrz" in zabaged_gdfs:
+            plot_masked(sym_key='sym304', zorder=36, mask=None, gdf=zabaged_gdfs["SkupinaBalvanu_b"], ax=ax, to_mask=False)
+        else:
+            mask_river = (
+                ((waterway == "river") | (waterway == "canal")) &
+                (~tunnel.isin(["culvert", "yes", "pipe", "covered", "cave"])) &
+                (~intermittent.isin(["yes", "dry"])) 
+            )
+            plot_masked(sym_key='sym304', zorder=26, mask=mask_river, gdf=gdf_lines, ax=ax)
+        # stream
+        if "VodniTok" in zabaged_gdfs:
+            mask = (
+                (get_col(zabaged_gdfs["VodniTok"], "typtoku_p").isin(["povrchový nesplavný"])) &
+                (get_col(zabaged_gdfs["VodniTok"], "vydattok_p").isin(["stálý"]))
+            )
+            plot_masked(sym_key='sym305', zorder=26, mask=mask, gdf=zabaged_gdfs["VodniTok"], ax=ax)
+        else:
+            mask_stream = (
+                ((waterway == "stream") | (waterway == "ditch")) &
+                (~tunnel.isin(["culvert", "yes", "pipe", "covered", "cave"])) &
+                (~intermittent.isin(["yes", "dry"])) 
+            )
+            plot_masked(sym_key='sym305', zorder=26, mask=mask_stream, gdf=gdf_lines, ax=ax)
+        # water_deep
+        if "VodniPlocha" in zabaged_gdfs:
+            plot_masked(sym_key='sym301', zorder=25, mask=None, gdf=zabaged_gdfs["VodniPlocha"], ax=ax, to_mask=False)
+            pass
+        else:
+            mask_water_deep = (
+                (natural.isin(["lake", "water", "canal"])) | (water.isin(["lake", "river", "basin", "bay", "reservoir"])) | (landuse == "basin") | (leisure == "swimming_pool")
+            )
+            plot_masked(sym_key='sym301', zorder=25, mask=mask_water_deep, gdf=gdf_polygons, ax=ax)
+        # water_shallow
+        mask_water_shallow = (
+            (water == "stream") 
         )
-        plot_masked(sym_key='sym304', zorder=26, mask=mask, gdf=zabaged_gdfs["VodniTok"], ax=ax)
-    if "PozemniNadrz" in zabaged_gdfs:
-        plot_masked(sym_key='sym304', zorder=36, mask=None, gdf=zabaged_gdfs["SkupinaBalvanu_b"], ax=ax, to_mask=False)
-    else:
-        mask_river = (
-            ((waterway == "river") | (waterway == "canal")) &
-            (~tunnel.isin(["culvert", "yes", "pipe", "covered", "cave"])) &
-            (~intermittent.isin(["yes", "dry"])) 
+        plot_masked(sym_key='sym302', zorder=27, mask=mask_water_shallow, gdf=gdf_polygons, ax=ax)
+        # water_drain
+        if "VodniTok" in zabaged_gdfs:
+            mask = (
+                (get_col(zabaged_gdfs["VodniTok"], "typtoku_p").isin(["povrchový splavný", "povrchový nesplavný"])) &
+                (get_col(zabaged_gdfs["VodniTok"], "vydattok_p").isin(["občasný"]))
+            )
+            plot_masked(sym_key='sym306', zorder=26, mask=mask, gdf=zabaged_gdfs["VodniTok"], ax=ax)
+        else:
+            mask_drain = (
+                ((waterway == "drain") | ((waterway.isin(["stream", "ditch"])) & (~intermittent.isin(["yes", "dry"])))) &
+                (~tunnel.isin(["culvert", "yes", "pipe", "covered", "cave"])) 
+            )
+            plot_masked(sym_key='sym306', zorder=26, mask=mask_drain, gdf=gdf_lines, ax=ax)
+        # wetland1
+        if "Raseliniste" in zabaged_gdfs:
+            plot_masked(sym_key='sym307', zorder=25, mask=None, gdf=zabaged_gdfs["Raseliniste"], ax=ax, to_mask=False)
+        else:
+            mask_wetland1 = (
+                (wetland == "reedbed")
+            )
+            plot_masked(sym_key='sym307', zorder=25, mask=mask_wetland1, gdf=gdf_polygons, ax=ax)
+        # wetland2
+        if "BazinaMocal" in zabaged_gdfs:
+            plot_masked(sym_key='sym308', zorder=25, mask=None, gdf=zabaged_gdfs["BazinaMocal"], ax=ax, to_mask=False)
+            pass
+        else:
+            mask_wetland2 = (
+                (natural == "wetland") & (~wetland.isin(["marsh", "wet_meadow", "reedbed"]))
+            )
+            plot_masked(sym_key='sym308', zorder=25, mask=mask_wetland2, gdf=gdf_polygons, ax=ax)
+        # wetland3
+        mask_wetland3 = (
+            (wetland == "marsh") | (water == "wet_meadow")
         )
-        plot_masked(sym_key='sym304', zorder=26, mask=mask_river, gdf=gdf_lines, ax=ax)
-    # stream
-    if "VodniTok" in zabaged_gdfs:
-        mask = (
-            (get_col(zabaged_gdfs["VodniTok"], "typtoku_p").isin(["povrchový nesplavný"])) &
-            (get_col(zabaged_gdfs["VodniTok"], "vydattok_p").isin(["stálý"]))
+        plot_masked(sym_key='sym310', zorder=25, mask=mask_wetland3, gdf=gdf_polygons, ax=ax)
+        # well
+        mask_well = (
+            (man_made == "water_well") | (amenity == "fountain") | (natural == "geysyer") |
+            (((emergency == "water_tank") | (man_made == "storage_tank")) & (~covered.isin(["yes", "roof", "shelter"])))
         )
-        plot_masked(sym_key='sym305', zorder=26, mask=mask, gdf=zabaged_gdfs["VodniTok"], ax=ax)
-    else:
-        mask_stream = (
-            ((waterway == "stream") | (waterway == "ditch")) &
-            (~tunnel.isin(["culvert", "yes", "pipe", "covered", "cave"])) &
-            (~intermittent.isin(["yes", "dry"])) 
-        )
-        plot_masked(sym_key='sym305', zorder=26, mask=mask_stream, gdf=gdf_lines, ax=ax)
-    # water_deep
-    if "VodniPlocha" in zabaged_gdfs:
-        plot_masked(sym_key='sym301', zorder=25, mask=None, gdf=zabaged_gdfs["VodniPlocha"], ax=ax, to_mask=False)
-        pass
-    else:
-        mask_water_deep = (
-            (natural.isin(["lake", "water", "canal"])) | (water.isin(["lake", "river", "basin", "bay", "reservoir"])) | (landuse == "basin") | (leisure == "swimming_pool")
-        )
-        plot_masked(sym_key='sym301', zorder=25, mask=mask_water_deep, gdf=gdf_polygons, ax=ax)
-    # water_shallow
-    mask_water_shallow = (
-        (water == "stream") 
-    )
-    plot_masked(sym_key='sym302', zorder=27, mask=mask_water_shallow, gdf=gdf_polygons, ax=ax)
-    # water_drain
-    if "VodniTok" in zabaged_gdfs:
-        mask = (
-            (get_col(zabaged_gdfs["VodniTok"], "typtoku_p").isin(["povrchový splavný", "povrchový nesplavný"])) &
-            (get_col(zabaged_gdfs["VodniTok"], "vydattok_p").isin(["občasný"]))
-        )
-        plot_masked(sym_key='sym306', zorder=26, mask=mask, gdf=zabaged_gdfs["VodniTok"], ax=ax)
-    else:
-        mask_drain = (
-            ((waterway == "drain") | ((waterway.isin(["stream", "ditch"])) & (~intermittent.isin(["yes", "dry"])))) &
-            (~tunnel.isin(["culvert", "yes", "pipe", "covered", "cave"])) 
-        )
-        plot_masked(sym_key='sym306', zorder=26, mask=mask_drain, gdf=gdf_lines, ax=ax)
-    # wetland1
-    if "Raseliniste" in zabaged_gdfs:
-        plot_masked(sym_key='sym307', zorder=25, mask=None, gdf=zabaged_gdfs["Raseliniste"], ax=ax, to_mask=False)
-    else:
-        mask_wetland1 = (
-            (wetland == "reedbed")
-        )
-        plot_masked(sym_key='sym307', zorder=25, mask=mask_wetland1, gdf=gdf_polygons, ax=ax)
-    # wetland2
-    if "BazinaMocal" in zabaged_gdfs:
-        plot_masked(sym_key='sym308', zorder=25, mask=None, gdf=zabaged_gdfs["BazinaMocal"], ax=ax, to_mask=False)
-        pass
-    else:
-        mask_wetland2 = (
-            (natural == "wetland") & (~wetland.isin(["marsh", "wet_meadow", "reedbed"]))
-        )
-        plot_masked(sym_key='sym308', zorder=25, mask=mask_wetland2, gdf=gdf_polygons, ax=ax)
-    # wetland3
-    mask_wetland3 = (
-        (wetland == "marsh") | (water == "wet_meadow")
-    )
-    plot_masked(sym_key='sym310', zorder=25, mask=mask_wetland3, gdf=gdf_polygons, ax=ax)
-    # well
-    mask_well = (
-        (man_made == "water_well") | (amenity == "fountain") | (natural == "geysyer") |
-        (((emergency == "water_tank") | (man_made == "storage_tank")) & (~covered.isin(["yes", "roof", "shelter"])))
-    )
-    plot_masked(sym_key='sym311', zorder=52, mask=mask_well, gdf=gdf_centroids, ax=ax)
-    # spring
-    if "ZdrojPodzemnichVod" in zabaged_gdfs:
-        plot_masked(sym_key='sym312', zorder=52, mask=None, gdf=zabaged_gdfs["ZdrojPodzemnichVod"], ax=ax, to_mask=False)
-    else:
-        mask_spring = (
-            (natural == "spring") & (covered != "yes")
-        )
-    plot_masked(sym_key='sym312', zorder=52, mask=mask_spring, gdf=gdf_centroids, ax=ax)
+        plot_masked(sym_key='sym311', zorder=52, mask=mask_well, gdf=gdf_centroids, ax=ax)
+        # spring
+        if "ZdrojPodzemnichVod" in zabaged_gdfs:
+            plot_masked(sym_key='sym312', zorder=52, mask=None, gdf=zabaged_gdfs["ZdrojPodzemnichVod"], ax=ax, to_mask=False)
+        else:
+            mask_spring = (
+                (natural == "spring") & (covered != "yes")
+            )
+        plot_masked(sym_key='sym312', zorder=52, mask=mask_spring, gdf=gdf_centroids, ax=ax)
 
     # LANDCOVER ======================================================================
-    # grass_low
-    if "TrvalyTravniPorost" in zabaged_gdfs:
-        plot_masked(sym_key='sym401', zorder=1.0, mask=None, gdf=zabaged_gdfs["TrvalyTravniPorost"], ax=ax, to_mask=False)
-        pass
-    else:
-        mask_grass_low = (landuse.isin(["grassland", "grass"])) | (natural == "grassland")
-        plot_masked(sym_key='sym401', zorder=1.0, mask=mask_grass_low, gdf=gdf_polygons, ax=ax)
-    # grass_park
-    if "OkrasnaZahradaPark" in zabaged_gdfs: #(ale nelze z toho klasifikovat, jestli se stromy nebo bez)
-        plot_masked(sym_key='sym402', zorder=1.0, mask=None, gdf=zabaged_gdfs["OkrasnaZahradaPark"], ax=ax, to_mask=False)
-    else:
-        mask_park = (
-            (leisure == "park")
-        ) 
-        plot_masked(sym_key='sym402', zorder=1.0, mask=mask_park, gdf=gdf_polygons, ax=ax)
-    # grass_high
-    mask_grass_high = (
-        (landuse == "meadow") | (natural.isin(["fell", "heath"])) # Tohle jsou taky louky značené jako klasický Open Land
-    )
-    plot_masked(sym_key='sym401', zorder=1.0, mask=mask_grass_high, gdf=gdf_polygons, ax=ax)
+    if visibility.get("vegetation", True):
+        # grass_low
+        if "TrvalyTravniPorost" in zabaged_gdfs:
+            plot_masked(sym_key='sym401', zorder=1.0, mask=None, gdf=zabaged_gdfs["TrvalyTravniPorost"], ax=ax, to_mask=False)
+            pass
+        else:
+            mask_grass_low = (landuse.isin(["grassland", "grass"])) | (natural == "grassland")
+            plot_masked(sym_key='sym401', zorder=1.0, mask=mask_grass_low, gdf=gdf_polygons, ax=ax)
+        # grass_park
+        if "OkrasnaZahradaPark" in zabaged_gdfs: #(ale nelze z toho klasifikovat, jestli se stromy nebo bez)
+            plot_masked(sym_key='sym402', zorder=1.0, mask=None, gdf=zabaged_gdfs["OkrasnaZahradaPark"], ax=ax, to_mask=False)
+        else:
+            mask_park = (
+                (leisure == "park")
+            ) 
+            plot_masked(sym_key='sym402', zorder=1.0, mask=mask_park, gdf=gdf_polygons, ax=ax)
+        # grass_high
+        mask_grass_high = (
+            (landuse == "meadow") | (natural.isin(["fell", "heath"])) # Tohle jsou taky louky značené jako klasický Open Land
+        )
+        plot_masked(sym_key='sym401', zorder=1.0, mask=mask_grass_high, gdf=gdf_polygons, ax=ax)
 
-    # LESY JEN POR JISTOTU KONCEPČNĚ, ALE POČÍTÁME, ŽE SE BUDOU DĚLAT Z LIDARU
-    
-    if "LesniPudaSeStromyKategorizovana" in zabaged_gdfs:
-        mask = (
-            (get_col(zabaged_gdfs["LesniPudaSeStromyKategorizovana"], "druh_k").isin(["J"])) & 
-            (get_col(zabaged_gdfs["LesniPudaSeStromyKategorizovana"], "vyska_k").isin(["3"]))
-        )
-        plot_masked(sym_key='sym416p', zorder=1.8, mask=mask, gdf=zabaged_gdfs["LesniPudaSeStromyKategorizovana"], ax=ax)
-    else:
-        pass
-    """
-    if "LesniPudaSKosodrevinou" in zabaged_gdfs: #(kategorizovat podle atributů)
-        plot_masked(sym_key='sym410', zorder=5, mask=None, gdf=zabaged_gdfs["LesniPudaSKosodrevinou"], ax=ax, to_mask=False)
-        pass
-    if "LesniPudaSKrovinatymPorostem" in zabaged_gdfs: #(kategorizovat podle atributů)
-        plot_masked(sym_key='sym408', zorder=4, mask=None, gdf=zabaged_gdfs["LesniPudaSKrovinatymPorostem"], ax=ax, to_mask=False)
-        pass
-    if "LesniPudaSeStromyKategorizovana" not in zabaged_gdfs and "LesniPudaSKosodrevinou" not in zabaged_gdfs and "LesniPudaSKrovinatymPorostem" not in zabaged_gdfs:
-        mask_forest = (
-            (landuse == "forest") | (natural == "wood")
-        )
-        plot_masked(sym_key='sym405', zorder=2, mask=mask_forest, gdf=gdf_polygons, ax=ax)
-    """
-    # alley
-    zabaged_layer = "LiniovaVegetace"
-    if zabaged_layer in zabaged_gdfs:
-        mask = (
-            (get_col(zabaged_gdfs["LiniovaVegetace"], "typveg_p").isin(["živý plot"]))
-        )
-        plot_masked(sym_key='sym408l', zorder=19, mask=mask, gdf=zabaged_gdfs["LiniovaVegetace"], ax=ax, to_mask=False)
-        pass
-    else:
-        mask_alley = (
-            (natural == "tree_row")
-        )
-        plot_masked(sym_key='sym408l', zorder=99, mask=mask_alley, gdf=gdf_polygons, ax=ax)
-    # field
-    if "OrnaPudaAOstatniDaleNespecifikovanePlochy" in zabaged_gdfs:
-        mask = (
-            (get_col(zabaged_gdfs["OrnaPudaAOstatniDaleNespecifikovanePlochy"], "typ_pudy_p").isin(["orná půda"]))
-        )
-        plot_masked(sym_key='sym412a', zorder=1.9, mask=None, gdf=zabaged_gdfs["OrnaPudaAOstatniDaleNespecifikovanePlochy"], ax=ax, to_mask=False)
-        plot_masked(sym_key='sym412b', zorder=15, mask=None, gdf=zabaged_gdfs["OrnaPudaAOstatniDaleNespecifikovanePlochy"], ax=ax, to_mask=False)
-    else:
-        mask_field = (
-            (landuse == "farmland")
-        )
-        plot_masked(sym_key='sym412a', zorder=1.9, mask=mask_field, gdf=gdf_polygons, ax=ax)
-        plot_masked(sym_key='sym412b', zorder=15, mask=mask_field, gdf=gdf_polygons, ax=ax)
+        # LESY JEN POR JISTOTU KONCEPČNĚ, ALE POČÍTÁME, ŽE SE BUDOU DĚLAT Z LIDARU
+        
+        if "LesniPudaSeStromyKategorizovana" in zabaged_gdfs:
+            mask = (
+                (get_col(zabaged_gdfs["LesniPudaSeStromyKategorizovana"], "druh_k").isin(["J"])) & 
+                (get_col(zabaged_gdfs["LesniPudaSeStromyKategorizovana"], "vyska_k").isin(["3"]))
+            )
+            plot_masked(sym_key='sym416p', zorder=1.8, mask=mask, gdf=zabaged_gdfs["LesniPudaSeStromyKategorizovana"], ax=ax)
+        else:
+            pass
+        """
+        if "LesniPudaSKosodrevinou" in zabaged_gdfs: #(kategorizovat podle atributů)
+            plot_masked(sym_key='sym410', zorder=5, mask=None, gdf=zabaged_gdfs["LesniPudaSKosodrevinou"], ax=ax, to_mask=False)
+            pass
+        if "LesniPudaSKrovinatymPorostem" in zabaged_gdfs: #(kategorizovat podle atributů)
+            plot_masked(sym_key='sym408', zorder=4, mask=None, gdf=zabaged_gdfs["LesniPudaSKrovinatymPorostem"], ax=ax, to_mask=False)
+            pass
+        if "LesniPudaSeStromyKategorizovana" not in zabaged_gdfs and "LesniPudaSKosodrevinou" not in zabaged_gdfs and "LesniPudaSKrovinatymPorostem" not in zabaged_gdfs:
+            mask_forest = (
+                (landuse == "forest") | (natural == "wood")
+            )
+            plot_masked(sym_key='sym405', zorder=2, mask=mask_forest, gdf=gdf_polygons, ax=ax)
+        """
+        # alley
+        zabaged_layer = "LiniovaVegetace"
+        if zabaged_layer in zabaged_gdfs:
+            mask = ( 
+                (get_col(zabaged_gdfs["LiniovaVegetace"], "typveg_p").isin(["živý plot"]))
+            )
+            plot_masked(sym_key='sym408l', zorder=19, mask=mask, gdf=zabaged_gdfs["LiniovaVegetace"], ax=ax) 
+            pass
+        else:
+            mask_alley = (
+                (natural == "tree_row")
+            )
+            plot_masked(sym_key='sym408l', zorder=99, mask=mask_alley, gdf=gdf_polygons, ax=ax)
+        # field
+        if "OrnaPudaAOstatniDaleNespecifikovanePlochy" in zabaged_gdfs:
+            mask = (
+                (get_col(zabaged_gdfs["OrnaPudaAOstatniDaleNespecifikovanePlochy"], "typ_pudy_p").isin(["orná půda"]))
+            )
+            plot_masked(sym_key='sym412a', zorder=1.9, mask=None, gdf=zabaged_gdfs["OrnaPudaAOstatniDaleNespecifikovanePlochy"], ax=ax, to_mask=False)
+            plot_masked(sym_key='sym412b', zorder=15, mask=None, gdf=zabaged_gdfs["OrnaPudaAOstatniDaleNespecifikovanePlochy"], ax=ax, to_mask=False)
+        else:
+            mask_field = (
+                (landuse == "farmland")
+            )
+            plot_masked(sym_key='sym412a', zorder=1.9, mask=mask_field, gdf=gdf_polygons, ax=ax)
+            plot_masked(sym_key='sym412b', zorder=15, mask=mask_field, gdf=gdf_polygons, ax=ax)
 
-    # orchad
-    mask_orchad = (
-        (landuse == "orchad")
-    )
-    plot_masked(sym_key='sym413', zorder=1.9, mask=mask_orchad, gdf=gdf_polygons, ax=ax)
-    # vineyard
-    if "Vinice" in zabaged_gdfs:
-        plot_masked(sym_key='sym414', zorder=1.9, mask=None, gdf=zabaged_gdfs["Vinice"], ax=ax, to_mask=False)
-        pass
-    if "Chmelnice" in zabaged_gdfs:
-        plot_masked(sym_key='sym414', zorder=1.9, mask=None, gdf=zabaged_gdfs["Chmelnice"], ax=ax, to_mask=False)
-        pass
-    if "Vinice" not in zabaged_gdfs and "Chmelnice" not in zabaged_gdfs:
-        mask_vineyard = (
-            (landuse == "vineyard")
+        # orchad
+        mask_orchad = (
+            (landuse == "orchad")
         )
-        plot_masked(sym_key='sym414', zorder=1.9, mask=mask_vineyard, gdf=gdf_polygons, ax=ax)
-    # vegetation_change
-    zabaged_layer = "HraniceUzivaniPudy" # tohle je sračka, protože to je kolem každýho pozemku
-    if zabaged_layer in zabaged_gdfs:
-        #plot_masked(sym_key='sym416l', zorder=22, mask=None, gdf=zabaged_gdfs["HraniceUzivaniPudy"], ax=ax, to_mask=False)
-        pass
-    # tree
-    if "VyznamnyNeboOsamelyStromLesik" in zabaged_gdfs and zabaged_gdfs["VyznamnyNeboOsamelyStromLesik"] is not None:
-        plot_masked(sym_key='sym417a', zorder=54, mask=None, gdf=zabaged_gdfs["VyznamnyNeboOsamelyStromLesik"], ax=ax, to_mask=False)
-        plot_masked(sym_key='sym417b', zorder=54, mask=None, gdf=zabaged_gdfs["VyznamnyNeboOsamelyStromLesik"], ax=ax, to_mask=False)
-    else:
-        mask_tree = (natural == "tree")
-        if not gdf_centroids[mask_tree].empty:
-            plot_masked(sym_key='sym417a', zorder=54, mask=mask_tree, gdf=gdf_centroids, ax=ax)
-            plot_masked(sym_key='sym417b', zorder=55, mask=mask_tree, gdf=gdf_centroids, ax=ax)
+        plot_masked(sym_key='sym413', zorder=1.9, mask=mask_orchad, gdf=gdf_polygons, ax=ax)
+        # vineyard
+        if "Vinice" in zabaged_gdfs:
+            plot_masked(sym_key='sym414', zorder=1.9, mask=None, gdf=zabaged_gdfs["Vinice"], ax=ax, to_mask=False)
+            pass
+        if "Chmelnice" in zabaged_gdfs:
+            plot_masked(sym_key='sym414', zorder=1.9, mask=None, gdf=zabaged_gdfs["Chmelnice"], ax=ax, to_mask=False)
+            pass
+        if "Vinice" not in zabaged_gdfs and "Chmelnice" not in zabaged_gdfs:
+            mask_vineyard = (
+                (landuse == "vineyard")
+            )
+            plot_masked(sym_key='sym414', zorder=1.9, mask=mask_vineyard, gdf=gdf_polygons, ax=ax)
+        # vegetation_change
+        zabaged_layer = "HraniceUzivaniPudy" # tohle je sračka, protože to je kolem každýho pozemku
+        if zabaged_layer in zabaged_gdfs:
+            #plot_masked(sym_key='sym416l', zorder=22, mask=None, gdf=zabaged_gdfs["HraniceUzivaniPudy"], ax=ax, to_mask=False)
+            pass
+        # tree
+        if "VyznamnyNeboOsamelyStromLesik" in zabaged_gdfs and zabaged_gdfs["VyznamnyNeboOsamelyStromLesik"] is not None:
+            plot_masked(sym_key='sym417a', zorder=54, mask=None, gdf=zabaged_gdfs["VyznamnyNeboOsamelyStromLesik"], ax=ax, to_mask=False)
+            plot_masked(sym_key='sym417b', zorder=54, mask=None, gdf=zabaged_gdfs["VyznamnyNeboOsamelyStromLesik"], ax=ax, to_mask=False)
+        else:
+            mask_tree = (natural == "tree")
+            if not gdf_centroids[mask_tree].empty:
+                plot_masked(sym_key='sym417a', zorder=54, mask=mask_tree, gdf=gdf_centroids, ax=ax)
+                plot_masked(sym_key='sym417b', zorder=55, mask=mask_tree, gdf=gdf_centroids, ax=ax)
 
-    # shrub
-    mask_shrub = (natural == "shrub")
-    if not gdf_centroids[mask_shrub].empty:
-        plot_masked(sym_key='sym418a', zorder=54, mask=mask_shrub, gdf=gdf_centroids, ax=ax)
-        plot_masked(sym_key='sym418b', zorder=54, mask=mask_shrub, gdf=gdf_centroids, ax=ax)
+        # shrub
+        mask_shrub = (natural == "shrub")
+        if not gdf_centroids[mask_shrub].empty:
+            plot_masked(sym_key='sym418a', zorder=54, mask=mask_shrub, gdf=gdf_centroids, ax=ax)
+            plot_masked(sym_key='sym418b', zorder=54, mask=mask_shrub, gdf=gdf_centroids, ax=ax)
 
-    # stump
-    mask_stump = (natural == "tree_stump")
-    if not gdf_centroids[mask_stump].empty:
-        plot_masked(sym_key='sym418a', zorder=54, mask=mask_stump, gdf=gdf_centroids, ax=ax)
-        plot_masked(sym_key='sym418b', zorder=54, mask=mask_stump, gdf=gdf_centroids, ax=ax)
+        # stump
+        mask_stump = (natural == "tree_stump")
+        if not gdf_centroids[mask_stump].empty:
+            plot_masked(sym_key='sym418a', zorder=54, mask=mask_stump, gdf=gdf_centroids, ax=ax)
+            plot_masked(sym_key='sym418b', zorder=54, mask=mask_stump, gdf=gdf_centroids, ax=ax)
+
     # PARKINGS & SQUARES ======================================================================
-    # parking
-    if "ParkovisteOdpocivka" in zabaged_gdfs:
-        plot_masked(sym_key='sym501', zorder=46, mask=None, gdf=zabaged_gdfs["ParkovisteOdpocivka"], ax=ax, to_mask=False)
-    if "ArealUceloveZastavby" in zabaged_gdfs:
-        mask = (
-            (get_col(zabaged_gdfs["ArealUceloveZastavby"], "typzast_k").isin(["408"]))
-        )
-        plot_masked(sym_key='sym501', zorder=46, mask=mask, gdf=zabaged_gdfs["ArealUceloveZastavby"], ax=ax)
-    else:
-        mask_parking = (
-            ((amenity == "parking") & (~parking.isin(["garage", "underground"]))) |
-            (place == "square") | (highway.isin(["service", "pedestrian", "footway"])) |
-            (man_made == "bunker_silo")                                                
-        )
-        plot_masked(sym_key='sym501', zorder=43, mask=mask_parking, gdf=gdf_polygons, ax=ax)
+    if visibility.get("roads", True):
+        # parking
+        if "ParkovisteOdpocivka" in zabaged_gdfs:
+            plot_masked(sym_key='sym501', zorder=46, mask=None, gdf=zabaged_gdfs["ParkovisteOdpocivka"], ax=ax, to_mask=False)
+        if "ArealUceloveZastavby" in zabaged_gdfs:
+            mask = (
+                (get_col(zabaged_gdfs["ArealUceloveZastavby"], "typzast_k").isin(["408"]))
+            )
+            plot_masked(sym_key='sym501', zorder=46, mask=mask, gdf=zabaged_gdfs["ArealUceloveZastavby"], ax=ax)
+        else:
+            mask_parking = (
+                ((amenity == "parking") & (~parking.isin(["garage", "underground"]))) |
+                (place == "square") | (highway.isin(["service", "pedestrian", "footway"])) |
+                (man_made == "bunker_silo")                                                
+            )
+            plot_masked(sym_key='sym501', zorder=43, mask=mask_parking, gdf=gdf_polygons, ax=ax)
 
-    # ROADS ======================================================================
-    # road_double
-    if "SilniceDalnice" in zabaged_gdfs:
-        mask = (
-            (get_col(zabaged_gdfs["SilniceDalnice"], "typsil_k").isin(["D1", "D2", "M"]))
-        )
-        plot_masked(sym_key='sym502Da', zorder=45, mask=mask, gdf=zabaged_gdfs["SilniceDalnice"], ax=ax)
-        plot_masked(sym_key='sym502Db', zorder=47, mask=mask, gdf=zabaged_gdfs["SilniceDalnice"], ax=ax)
-        plot_masked(sym_key='sym502Dc', zorder=48, mask=mask, gdf=zabaged_gdfs["SilniceDalnice"], ax=ax)
-    else:
-        mask_road_double = (
+        # ROADS ======================================================================
+        # road_double
+        if "SilniceDalnice" in zabaged_gdfs:
+            mask = (
+                (get_col(zabaged_gdfs["SilniceDalnice"], "typsil_k").isin(["D1", "D2", "M"]))
+            )
+            plot_masked(sym_key='sym502Da', zorder=45, mask=mask, gdf=zabaged_gdfs["SilniceDalnice"], ax=ax)
+            plot_masked(sym_key='sym502Db', zorder=47, mask=mask, gdf=zabaged_gdfs["SilniceDalnice"], ax=ax)
+            plot_masked(sym_key='sym502Dc', zorder=48, mask=mask, gdf=zabaged_gdfs["SilniceDalnice"], ax=ax)
+        else:
+            mask_road_double = (
+                (highway.isin(["motorway", "trunk"])) &
+                (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
+                (bridge != "yes") & (access != "private")                                               
+            )
+            plot_masked(sym_key='sym502Da', zorder=45, mask=mask_road_double, gdf=gdf_lines, ax=ax)
+            plot_masked(sym_key='sym502Db', zorder=47, mask=mask_road_double, gdf=gdf_lines, ax=ax)
+            plot_masked(sym_key='sym502Dc', zorder=48, mask=mask_road_double, gdf=gdf_lines, ax=ax)
+        # road_major
+        if "SilniceDalnice" in zabaged_gdfs:
+            mask = ((~get_col(zabaged_gdfs["SilniceDalnice"], "typsil_k").isin(["D1", "D2", "M"])))
+            plot_masked(sym_key='sym502a', zorder=45, mask=mask, gdf=zabaged_gdfs["SilniceDalnice"], ax=ax)
+            plot_masked(sym_key='sym502b', zorder=47, mask=mask, gdf=zabaged_gdfs["SilniceDalnice"], ax=ax)     
+        if "Ulice" in zabaged_gdfs:
+            mask = (
+                (get_col(zabaged_gdfs["Ulice"], "typulice_k").isin(["026", "926"]))
+            )
+            plot_masked(sym_key='sym502a', zorder=45, mask=mask, gdf=zabaged_gdfs["Ulice"], ax=ax)
+            plot_masked(sym_key='sym502b', zorder=47, mask=mask, gdf=zabaged_gdfs["Ulice"], ax=ax)
+
+        if "SilniceVeVastavbe" in zabaged_gdfs:
+            plot_masked(sym_key='sym502a', zorder=45, mask=mask_road_major, gdf=gdf_lines, ax=ax)
+            plot_masked(sym_key='sym502b', zorder=47, mask=mask_road_major, gdf=gdf_lines, ax=ax)   
+        if "SilniceDalnice" not in zabaged_gdfs and "Ulice" not in zabaged_gdfs:
+            mask_road_major = (
+                (highway.isin(["highway_link", "trunk_link", "primary", "secondary", "secondary_link", "residential", "tertiary", "living_street"])) &
+                (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
+                (bridge != "yes") & (access != "private")                                               
+            )
+            plot_masked(sym_key='sym502a', zorder=45, mask=mask_road_major, gdf=gdf_lines, ax=ax)
+            plot_masked(sym_key='sym502b', zorder=47, mask=mask_road_major, gdf=gdf_lines, ax=ax)
+        # road_minor    
+        if "SilniceNeevidovana" in zabaged_gdfs:
+            plot_masked(sym_key='sym503', zorder=45, mask=None, gdf=zabaged_gdfs["SilniceNeevidovana"], ax=ax, to_mask=False)
+        if "Cesta" in zabaged_gdfs:
+            mask = (
+                (get_col(zabaged_gdfs["Cesta"], "povrch_p").isin(["zpevněný (panel, dlažba)", "zpevněný (asfalt, beton)"])) & 
+                (get_col(zabaged_gdfs["Cesta"], "typcesty_p").isin(["cesta udržovaná"]))
+            )
+            plot_masked(sym_key='sym503', zorder=45, mask=mask, gdf=zabaged_gdfs["Cesta"], ax=ax)
+        if "LyzarskyMustek" in zabaged_gdfs:
+            plot_masked(sym_key='sym503', zorder=46, mask=None, gdf=zabaged_gdfs["LyzarskyMustek"], ax=ax, to_mask=False)
+        if "SilniceNeevidovana" not in zabaged_gdfs and "Cesta" not in zabaged_gdfs:
+            mask_road_minor = (
+                ((highway.isin(["tertiary_link", "service"])) |
+                ((highway.isin(["track", "road", "cycleway", "track", "unclassified"])) & 
+                ((surface.isin(["concrete", "asphalt"])) | (tracktype == "grade1")))) &
+                (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
+                (bridge != "yes") & (access != "private")                                               
+            )
+            plot_masked(sym_key='sym503', zorder=45, mask=mask_road_minor, gdf=gdf_lines, ax=ax)
+        # track_major
+        if "Cesta" in zabaged_gdfs:
+            mask = (
+                (get_col(zabaged_gdfs["Cesta"], "povrch_p").isin(["zpevněný (nosný terén, štěrk, kalený povrch)", "nedostatečně zpevněný (tráva, hlína, písek, kamení)", "neurčeno", "NULL"])) & 
+                (get_col(zabaged_gdfs["Cesta"], "typcesty_p").isin(["cesta udržovaná"]))
+            )
+            plot_masked(sym_key='sym504', zorder=45, mask=mask, gdf=zabaged_gdfs["Cesta"], ax=ax)
+        else:
+            mask_track_major = (
+                ((highway.isin(["cycleway", "unclassified"])) & (~surface.isin(["concrete", "asphalt"])) & 
+                (tracktype != "grade1")) &
+                (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
+                (bridge != "yes") & (access != "private")                                               
+            )
+            plot_masked(sym_key='sym504', zorder=45, mask=mask_track_major, gdf=gdf_lines, ax=ax)
+        # track_minor
+        if "Ulice" in zabaged_gdfs:
+            mask = ((~get_col(zabaged_gdfs["Ulice"], "typulice_k").isin(["225"]))) #chodníky se nekreslí, ale nechám to tady
+            #plot_masked(sym_key='sym505', zorder=45, mask=mask, gdf=zabaged_gdfs["Ulice"], ax=ax)
+            pass
+        if "Ulice" in zabaged_gdfs:
+            mask = ((~get_col(zabaged_gdfs["Ulice"], "typulice_k").isin(["925", "025"])))
+            plot_masked(sym_key='sym505', zorder=45, mask=mask, gdf=zabaged_gdfs["Ulice"], ax=ax)
+        if "Cesta" in zabaged_gdfs:
+            mask = (
+                (get_col(zabaged_gdfs["Cesta"], "povrch_p").isin(["nedostatečně zpevněný (tráva, hlína, písek, kamení)", "neurčeno", "NULL"])) & 
+                (get_col(zabaged_gdfs["Cesta"], "typcesty_p").isin(["cesta neudržovaná"]))
+            )
+            plot_masked(sym_key='sym505', zorder=45, mask=mask, gdf=zabaged_gdfs["Cesta"], ax=ax)
+        if "Cesta" in zabaged_gdfs:
+            mask = (
+                (get_col(zabaged_gdfs["Cesta"], "typcesty_p").isin(["cesta neudržovaná"]))
+            )
+            plot_masked(sym_key='sym505', zorder=45, mask=mask, gdf=zabaged_gdfs["Cesta"], ax=ax)
+        if "Ulice" not in zabaged_gdfs and "Cesta" not in zabaged_gdfs:
+            mask_track_minor = (
+                ((highway.isin(["pedestrian", "road", "footway", "track", "bridleway"])) | ((highway == "cycleway") & (~surface.isin(["concrete", "asphalt"])) & (tracktype != "grade1"))) &
+                (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
+                (bridge != "yes") & (access != "private")                                               
+            )
+            plot_masked(sym_key='sym505', zorder=45, mask=mask_track_minor, gdf=gdf_lines, ax=ax)
+        # path_major
+        if "Pesina" in zabaged_gdfs:
+            plot_masked(sym_key='sym506', zorder=45, mask=None, gdf=zabaged_gdfs["Pesina"], ax=ax, to_mask=False)
+        else:
+            mask_path_major = (
+                (highway == "path") &
+                (~trail_visibility.isin(["low", "poor", "bad", "very_bad", "horrible", "no"])) &
+                (bridge != "yes") & (access != "private")                                               
+            )
+            plot_masked(sym_key='sym506', zorder=45, mask=mask_path_major, gdf=gdf_lines, ax=ax)
+        # path_minor
+            mask_path_minor = (
+                (highway == "path") &
+                (trail_visibility.isin(["low", "poor", "bad", "very_bad", "horrible"])) &
+                (bridge != "yes") & (access != "private")                                               
+            )
+            plot_masked(sym_key='sym507', zorder=45, mask=mask_path_minor, gdf=gdf_lines, ax=ax)
+        # clearing
+        if "LesniPrusek" in zabaged_gdfs:
+            plot_masked(sym_key='sym508', zorder=38, mask=None, gdf=zabaged_gdfs["LesniPrusek"], ax=ax, to_mask=False)
+        else:
+            mask_cutline = (
+                (man_made == "cutline")
+            )
+            plot_masked(sym_key='sym508', zorder=38, mask=mask_cutline, gdf=gdf_lines, ax=ax)
+        # bridge_double
+        mask_bridge_double = (
             (highway.isin(["motorway", "trunk"])) &
-            (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
-            (bridge != "yes") & (access != "private")                                               
-        )
-        plot_masked(sym_key='sym502Da', zorder=45, mask=mask_road_double, gdf=gdf_lines, ax=ax)
-        plot_masked(sym_key='sym502Db', zorder=47, mask=mask_road_double, gdf=gdf_lines, ax=ax)
-        plot_masked(sym_key='sym502Dc', zorder=48, mask=mask_road_double, gdf=gdf_lines, ax=ax)
-    # road_major
-    if "SilniceDalnice" in zabaged_gdfs:
-        mask = ((~get_col(zabaged_gdfs["SilniceDalnice"], "typsil_k").isin(["D1", "D2", "M"])))
-        plot_masked(sym_key='sym502a', zorder=45, mask=mask, gdf=zabaged_gdfs["SilniceDalnice"], ax=ax)
-        plot_masked(sym_key='sym502b', zorder=47, mask=mask, gdf=zabaged_gdfs["SilniceDalnice"], ax=ax)     
-    if "Ulice" in zabaged_gdfs:
-        mask = (
-            (get_col(zabaged_gdfs["Ulice"], "typulice_k").isin(["026", "926"]))
-        )
-        plot_masked(sym_key='sym502a', zorder=45, mask=mask, gdf=zabaged_gdfs["Ulice"], ax=ax)
-        plot_masked(sym_key='sym502b', zorder=47, mask=mask, gdf=zabaged_gdfs["Ulice"], ax=ax)
-
-    if "SilniceVeVastavbe" in zabaged_gdfs:
-        plot_masked(sym_key='sym502a', zorder=45, mask=mask_road_major, gdf=gdf_lines, ax=ax)
-        plot_masked(sym_key='sym502b', zorder=47, mask=mask_road_major, gdf=gdf_lines, ax=ax)   
-    if "SilniceDalnice" not in zabaged_gdfs and "Ulice" not in zabaged_gdfs:
-        mask_road_major = (
-            (highway.isin(["highway_link", "trunk_link", "primary", "secondary", "secondary_link", "residential", "tertiary", "living_street"])) &
-            (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
-            (bridge != "yes") & (access != "private")                                               
-        )
-        plot_masked(sym_key='sym502a', zorder=45, mask=mask_road_major, gdf=gdf_lines, ax=ax)
-        plot_masked(sym_key='sym502b', zorder=47, mask=mask_road_major, gdf=gdf_lines, ax=ax)
-    # road_minor    
-    if "SilniceNeevidovana" in zabaged_gdfs:
-        plot_masked(sym_key='sym503', zorder=45, mask=None, gdf=zabaged_gdfs["SilniceNeevidovana"], ax=ax, to_mask=False)
-    if "Cesta" in zabaged_gdfs:
-        mask = (
-            (get_col(zabaged_gdfs["Cesta"], "povrch_p").isin(["zpevněný (panel, dlažba)", "zpevněný (asfalt, beton)"])) & 
-            (get_col(zabaged_gdfs["Cesta"], "typcesty_p").isin(["cesta udržovaná"]))
-        )
-        plot_masked(sym_key='sym503', zorder=45, mask=mask, gdf=zabaged_gdfs["Cesta"], ax=ax)
-    if "LyzarskyMustek" in zabaged_gdfs:
-        plot_masked(sym_key='sym503', zorder=46, mask=None, gdf=zabaged_gdfs["LyzarskyMustek"], ax=ax, to_mask=False)
-    if "SilniceNeevidovana" not in zabaged_gdfs and "Cesta" not in zabaged_gdfs:
-        mask_road_minor = (
-            ((highway.isin(["tertiary_link", "service"])) |
-            ((highway.isin(["track", "road", "cycleway", "track", "unclassified"])) & 
-            ((surface.isin(["concrete", "asphalt"])) | (tracktype == "grade1")))) &
-            (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
-            (bridge != "yes") & (access != "private")                                               
-        )
-        plot_masked(sym_key='sym503', zorder=45, mask=mask_road_minor, gdf=gdf_lines, ax=ax)
-    # track_major
-    if "Cesta" in zabaged_gdfs:
-        mask = (
-            (get_col(zabaged_gdfs["Cesta"], "povrch_p").isin(["zpevněný (nosný terén, štěrk, kalený povrch)", "nedostatečně zpevněný (tráva, hlína, písek, kamení)", "neurčeno", "NULL"])) & 
-            (get_col(zabaged_gdfs["Cesta"], "typcesty_p").isin(["cesta udržovaná"]))
-        )
-        plot_masked(sym_key='sym504', zorder=45, mask=mask, gdf=zabaged_gdfs["Cesta"], ax=ax)
-    else:
-        mask_track_major = (
-            ((highway.isin(["cycleway", "unclassified"])) & (~surface.isin(["concrete", "asphalt"])) & 
-            (tracktype != "grade1")) &
-            (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
-            (bridge != "yes") & (access != "private")                                               
-        )
-        plot_masked(sym_key='sym504', zorder=45, mask=mask_track_major, gdf=gdf_lines, ax=ax)
-    # track_minor
-    if "Ulice" in zabaged_gdfs:
-        mask = ((~get_col(zabaged_gdfs["Ulice"], "typulice_k").isin(["225"]))) #chodníky se nekreslí, ale nechám to tady
-        #plot_masked(sym_key='sym505', zorder=45, mask=mask, gdf=zabaged_gdfs["Ulice"], ax=ax)
-        pass
-    if "Ulice" in zabaged_gdfs:
-        mask = ((~get_col(zabaged_gdfs["Ulice"], "typulice_k").isin(["925", "025"])))
-        plot_masked(sym_key='sym505', zorder=45, mask=mask, gdf=zabaged_gdfs["Ulice"], ax=ax)
-    if "Cesta" in zabaged_gdfs:
-        mask = (
-            (get_col(zabaged_gdfs["Cesta"], "povrch_p").isin(["nedostatečně zpevněný (tráva, hlína, písek, kamení)", "neurčeno", "NULL"])) & 
-            (get_col(zabaged_gdfs["Cesta"], "typcesty_p").isin(["cesta neudržovaná"]))
-        )
-        plot_masked(sym_key='sym505', zorder=45, mask=mask, gdf=zabaged_gdfs["Cesta"], ax=ax)
-    if "Cesta" in zabaged_gdfs:
-        mask = (
-            (get_col(zabaged_gdfs["Cesta"], "typcesty_p").isin(["cesta neudržovaná"]))
-        )
-        plot_masked(sym_key='sym505', zorder=45, mask=mask, gdf=zabaged_gdfs["Cesta"], ax=ax)
-    if "Ulice" not in zabaged_gdfs and "Cesta" not in zabaged_gdfs:
-        mask_track_minor = (
-            ((highway.isin(["pedestrian", "road", "footway", "track", "bridleway"])) | ((highway == "cycleway") & (~surface.isin(["concrete", "asphalt"])) & (tracktype != "grade1"))) &
-            (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
-            (bridge != "yes") & (access != "private")                                               
-        )
-        plot_masked(sym_key='sym505', zorder=45, mask=mask_track_minor, gdf=gdf_lines, ax=ax)
-    # path_major
-    if "Pesina" in zabaged_gdfs:
-        plot_masked(sym_key='sym506', zorder=45, mask=None, gdf=zabaged_gdfs["Pesina"], ax=ax, to_mask=False)
-    else:
-        mask_path_major = (
-            (highway == "path") &
-            (~trail_visibility.isin(["low", "poor", "bad", "very_bad", "horrible", "no"])) &
-            (bridge != "yes") & (access != "private")                                               
-        )
-        plot_masked(sym_key='sym506', zorder=45, mask=mask_path_major, gdf=gdf_lines, ax=ax)
-    # path_minor
-        mask_path_minor = (
-            (highway == "path") &
-            (trail_visibility.isin(["low", "poor", "bad", "very_bad", "horrible"])) &
-            (bridge != "yes") & (access != "private")                                               
-        )
-        plot_masked(sym_key='sym507', zorder=45, mask=mask_path_minor, gdf=gdf_lines, ax=ax)
-    # clearing
-    if "LesniPrusek" in zabaged_gdfs:
-        plot_masked(sym_key='sym508', zorder=38, mask=None, gdf=zabaged_gdfs["LesniPrusek"], ax=ax, to_mask=False)
-    else:
-        mask_cutline = (
-            (man_made == "cutline")
-        )
-        plot_masked(sym_key='sym508', zorder=38, mask=mask_cutline, gdf=gdf_lines, ax=ax)
-    # bridge_double
-    mask_bridge_double = (
-        (highway.isin(["motorway", "trunk"])) &
-        (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
-        (bridge == "yes") & (access != "private")                                               
-    )
-    plot_masked(sym_key='sym502DBa', zorder=65, mask=mask_bridge_double, gdf=gdf_lines, ax=ax)
-    plot_masked(sym_key='sym502DBb', zorder=66, mask=mask_bridge_double, gdf=gdf_lines, ax=ax)
-    plot_masked(sym_key='sym502Da', zorder=67, mask=mask_bridge_double, gdf=gdf_lines, ax=ax)
-    plot_masked(sym_key='sym502Db', zorder=68, mask=mask_bridge_double, gdf=gdf_lines, ax=ax)
-    plot_masked(sym_key='sym502Dc', zorder=69, mask=mask_bridge_double, gdf=gdf_lines, ax=ax)
-    # bridge_major
-    mask_bridge_major = (
-        (highway.isin(["highway_link", "trunk_link", "primary", "secondary", "secondary_link", "tertiary", "living_street"])) &
-        (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
-        (bridge == "yes") & (access != "private")                                               
-    )
-    plot_masked(sym_key='sym502Ba', zorder=65, mask=mask_bridge_major, gdf=gdf_lines, ax=ax)
-    plot_masked(sym_key='sym502Bb', zorder=66, mask=mask_bridge_major, gdf=gdf_lines, ax=ax)
-    plot_masked(sym_key='sym502a', zorder=67, mask=mask_bridge_major, gdf=gdf_lines, ax=ax)
-    plot_masked(sym_key='sym502b', zorder=68, mask=mask_bridge_major, gdf=gdf_lines, ax=ax)
-    # bridge_minor+track
-    mask_bridge_minor = (
-        (highway.isin(["tertiary_link", "residential", "service", "track", "road", "unclassified"])) &
-        (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
-        (bridge == "yes") & (access != "private")                                               
-    )
-    plot_masked(sym_key='sym503Ba', zorder=65, mask=mask_bridge_minor, gdf=gdf_lines, ax=ax)
-    plot_masked(sym_key='sym503Bb', zorder=66, mask=mask_bridge_minor, gdf=gdf_lines, ax=ax)
-    plot_masked(sym_key='sym503', zorder=67, mask=mask_bridge_minor, gdf=gdf_lines, ax=ax)
-    # bridge_path
-    if "Lavka" in zabaged_gdfs:
-        plot_masked(sym_key='sym503', zorder=67, mask=None, gdf=zabaged_gdfs["Lavka"], ax=ax, to_mask=False)
-    else:
-        mask_bridge_path = (
-            (highway.isin(["path", "cycleway", "footway", "bridleway"])) &
             (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
             (bridge == "yes") & (access != "private")                                               
         )
-        plot_masked(sym_key='sym503', zorder=67, mask=mask_bridge_path, gdf=gdf_lines, ax=ax)
+        plot_masked(sym_key='sym502DBa', zorder=65, mask=mask_bridge_double, gdf=gdf_lines, ax=ax)
+        plot_masked(sym_key='sym502DBb', zorder=66, mask=mask_bridge_double, gdf=gdf_lines, ax=ax)
+        plot_masked(sym_key='sym502Da', zorder=67, mask=mask_bridge_double, gdf=gdf_lines, ax=ax)
+        plot_masked(sym_key='sym502Db', zorder=68, mask=mask_bridge_double, gdf=gdf_lines, ax=ax)
+        plot_masked(sym_key='sym502Dc', zorder=69, mask=mask_bridge_double, gdf=gdf_lines, ax=ax)
+        # bridge_major
+        mask_bridge_major = (
+            (highway.isin(["highway_link", "trunk_link", "primary", "secondary", "secondary_link", "tertiary", "living_street"])) &
+            (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
+            (bridge == "yes") & (access != "private")                                               
+        )
+        plot_masked(sym_key='sym502Ba', zorder=65, mask=mask_bridge_major, gdf=gdf_lines, ax=ax)
+        plot_masked(sym_key='sym502Bb', zorder=66, mask=mask_bridge_major, gdf=gdf_lines, ax=ax)
+        plot_masked(sym_key='sym502a', zorder=67, mask=mask_bridge_major, gdf=gdf_lines, ax=ax)
+        plot_masked(sym_key='sym502b', zorder=68, mask=mask_bridge_major, gdf=gdf_lines, ax=ax)
+        # bridge_minor+track
+        mask_bridge_minor = (
+            (highway.isin(["tertiary_link", "residential", "service", "track", "road", "unclassified"])) &
+            (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
+            (bridge == "yes") & (access != "private")                                               
+        )
+        plot_masked(sym_key='sym503Ba', zorder=65, mask=mask_bridge_minor, gdf=gdf_lines, ax=ax)
+        plot_masked(sym_key='sym503Bb', zorder=66, mask=mask_bridge_minor, gdf=gdf_lines, ax=ax)
+        plot_masked(sym_key='sym503', zorder=67, mask=mask_bridge_minor, gdf=gdf_lines, ax=ax)
+        # bridge_path
+        if "Lavka" in zabaged_gdfs:
+            plot_masked(sym_key='sym503', zorder=67, mask=None, gdf=zabaged_gdfs["Lavka"], ax=ax, to_mask=False)
+        else:
+            mask_bridge_path = (
+                (highway.isin(["path", "cycleway", "footway", "bridleway"])) &
+                (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
+                (bridge == "yes") & (access != "private")                                               
+            )
+            plot_masked(sym_key='sym503', zorder=67, mask=mask_bridge_path, gdf=gdf_lines, ax=ax)
 
-    # RAILWAYS ======================================================================
-    # railway
-    if "ZeleznicniTrat" in zabaged_gdfs:
-        plot_masked(sym_key='sym509a', zorder=40, mask=None, gdf=zabaged_gdfs["ZeleznicniTrat"], ax=ax, to_mask=False)
-        plot_masked(sym_key='sym509b', zorder=41, mask=None, gdf=zabaged_gdfs["ZeleznicniTrat"], ax=ax, to_mask=False)
-    if "ZeleznicniVlecka" in zabaged_gdfs:
-        plot_masked(sym_key='sym509a', zorder=40, mask=None, gdf=zabaged_gdfs["ZeleznicniVlecka"], ax=ax, to_mask=False)
-        plot_masked(sym_key='sym509b', zorder=41, mask=None, gdf=zabaged_gdfs["ZeleznicniVlecka"], ax=ax, to_mask=False)
-    if "ZeleznicniTrat" not in zabaged_gdfs and "ZeleznicniVlecka" not in zabaged_gdfs:
-        mask_railway = (
+        # RAILWAYS ======================================================================
+        # railway
+        if "ZeleznicniTrat" in zabaged_gdfs:
+            plot_masked(sym_key='sym509a', zorder=40, mask=None, gdf=zabaged_gdfs["ZeleznicniTrat"], ax=ax, to_mask=False)
+            plot_masked(sym_key='sym509b', zorder=41, mask=None, gdf=zabaged_gdfs["ZeleznicniTrat"], ax=ax, to_mask=False)
+        if "ZeleznicniVlecka" in zabaged_gdfs:
+            plot_masked(sym_key='sym509a', zorder=40, mask=None, gdf=zabaged_gdfs["ZeleznicniVlecka"], ax=ax, to_mask=False)
+            plot_masked(sym_key='sym509b', zorder=41, mask=None, gdf=zabaged_gdfs["ZeleznicniVlecka"], ax=ax, to_mask=False)
+        if "ZeleznicniTrat" not in zabaged_gdfs and "ZeleznicniVlecka" not in zabaged_gdfs:
+            mask_railway = (
+                ((railway == "rail") | (railway == "disused") | (railway == "funicular") | (railway == "light-rail")  | (railway == "narrow_gauge")) &
+                (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
+                (~bridge.isin(["yes"])) 
+            )
+            plot_masked(sym_key='sym509a', zorder=40, mask=mask_railway, gdf=gdf_lines, ax=ax)
+            plot_masked(sym_key='sym509b', zorder=41, mask=mask_railway, gdf=gdf_lines, ax=ax)
+        # bridge_railway
+        mask_bridge_railway = (
             ((railway == "rail") | (railway == "disused") | (railway == "funicular") | (railway == "light-rail")  | (railway == "narrow_gauge")) &
             (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
-            (~bridge.isin(["yes"])) 
+            ((bridge == "yes")) 
         )
-        plot_masked(sym_key='sym509a', zorder=40, mask=mask_railway, gdf=gdf_lines, ax=ax)
-        plot_masked(sym_key='sym509b', zorder=41, mask=mask_railway, gdf=gdf_lines, ax=ax)
-    # bridge_railway
-    mask_bridge_railway = (
-        ((railway == "rail") | (railway == "disused") | (railway == "funicular") | (railway == "light-rail")  | (railway == "narrow_gauge")) &
-        (~tunnel.isin(["yes", "avalanche_protector", "building_passage"])) &
-        ((bridge == "yes")) 
-    )
-    plot_masked(sym_key='sym509Ba', zorder=60, mask=mask_bridge_railway, gdf=gdf_lines, ax=ax)
-    plot_masked(sym_key='sym509Bb', zorder=61, mask=mask_bridge_railway, gdf=gdf_lines, ax=ax)
-    plot_masked(sym_key='sym509a', zorder=62, mask=mask_bridge_railway, gdf=gdf_lines, ax=ax)
-    plot_masked(sym_key='sym509b', zorder=63, mask=mask_bridge_railway, gdf=gdf_lines, ax=ax)
+        plot_masked(sym_key='sym509Ba', zorder=60, mask=mask_bridge_railway, gdf=gdf_lines, ax=ax)
+        plot_masked(sym_key='sym509Bb', zorder=61, mask=mask_bridge_railway, gdf=gdf_lines, ax=ax)
+        plot_masked(sym_key='sym509a', zorder=62, mask=mask_bridge_railway, gdf=gdf_lines, ax=ax)
+        plot_masked(sym_key='sym509b', zorder=63, mask=mask_bridge_railway, gdf=gdf_lines, ax=ax)
 
-    #TODO: ZABAGED Most (ale neklasifikovaný na dálnice, silnice, železnice atd.) ... nevím, jestli je to k něčemu použitelné vůbec
+        #TODO: ZABAGED Most (ale neklasifikovaný na dálnice, silnice, železnice atd.) ... nevím, jestli je to k něčemu použitelné vůbec
 
-    # TUNNELS ================================= VUBEC NERESIT !!! =====================================
-    # tunnel
-    if "Tunel" in zabaged_gdfs:
-        #plot_masked(sym_key='sym512T', zorder=23, mask=None, gdf=zabaged_gdfs["Tunel"], ax=ax, to_mask=False)
-        pass
-    else:
-        mask_tunnel = (
-            ((highway.fillna("") != "") | (railway.fillna("") != "") | (waterway.fillna("") != ""))  &
-            (tunnel.isin(["yes", "avalanche_protector", "building_passage", "covered", "cave"]))
-        )
-        #plot_masked(sym_key='sym512T', zorder=23, mask=mask_tunnel, gdf=gdf_lines, ax=ax)
-        pass
+        # TUNNELS ================================= VUBEC NERESIT !!! =====================================
+        # tunnel
+        if "Tunel" in zabaged_gdfs:
+            #plot_masked(sym_key='sym512T', zorder=23, mask=None, gdf=zabaged_gdfs["Tunel"], ax=ax, to_mask=False)
+            pass
+        else:
+            mask_tunnel = (
+                ((highway.fillna("") != "") | (railway.fillna("") != "") | (waterway.fillna("") != ""))  &
+                (tunnel.isin(["yes", "avalanche_protector", "building_passage", "covered", "cave"]))
+            )
+            #plot_masked(sym_key='sym512T', zorder=23, mask=mask_tunnel, gdf=gdf_lines, ax=ax)
+            pass
 
     # POWER LINES ======================================================================
-    # cable_low
-    if "ElektrickeVedeni" in zabaged_gdfs:
-        mask = (
-            (~get_col(zabaged_gdfs["ElektrickeVedeni"], "napeti").isin(["400", "110"]))
-        )
-        plot_masked(sym_key='sym510', zorder=70, mask=mask, gdf=zabaged_gdfs["ElektrickeVedeni"], ax=ax)
-        pass
-    if "LanovaDrahaLyzarskyVlek" in zabaged_gdfs:
-        plot_masked(sym_key='sym510', zorder=70, mask=None, gdf=zabaged_gdfs["LanovaDrahaLyzarskyVlek"], ax=ax, to_mask=False)
-        pass
-    if "ElektrickeVedeni" not in zabaged_gdfs and "LanovaDrahaLyzarskyVlek" not in zabaged_gdfs:
-        mask_cable_low = (
-            (power == "low") | (aerialway.isin(["line", "cable_car", "gondola", "mixed_lift", "chair_lift", "chair_lift", "drag_lift", "t-bar", "j-bar", "platter", "rope_tow", "zip_line", "goods"]))
-        )
-        plot_masked(sym_key='sym510', zorder=70, mask=mask_cable_low, gdf=gdf_lines, ax=ax)
-    # cable_tower
-    if "StozarElektrickehoVedeni" in zabaged_gdfs:
-        pass
-        plot_masked(sym_key='sym511P', zorder=70, mask=None, gdf=zabaged_gdfs["StozarElektrickehoVedeni"], ax=ax, to_mask=False)
-    if "StozarLanoveDrahy" in zabaged_gdfs:
-        pass
-        plot_masked(sym_key='sym511P', zorder=70, mask=None, gdf=zabaged_gdfs["StozarLanoveDrahy"], ax=ax, to_mask=False)
-    if "StozarElektrickehoVedeni" not in zabaged_gdfs and "StozarLanoveDrahy" not in zabaged_gdfs:
-        mask_cable_tower = (
-            (aerialway == "pylon") | (man_made == "utility_pole") | (power.isin(["tower", "pole"]))
-        )
-        plot_masked(sym_key='sym511P', zorder=70, mask=mask_cable_tower, gdf=gdf_centroids, ax=ax)
-    # cable_high
-    if "ElektrickeVedeni" in zabaged_gdfs:
-        mask = (
-            (get_col(zabaged_gdfs["ElektrickeVedeni"], "napeti").isin(["400", "110"]))
-        )
-        plot_masked(sym_key='sym510', zorder=70, mask=mask, gdf=zabaged_gdfs["ElektrickeVedeni"], ax=ax)
-        pass
-    else:
-        mask_cable_high = (
-            (power.isin(["line", "minor_line"]))
-        )
-        plot_masked(sym_key='sym510', zorder=70, mask=mask_cable_high, gdf=gdf_lines, ax=ax) #tady asi nema cenu resit co je jaky vedeni a bude lepsi to vykreslovat vsechno jednim
-    # wall_low
-    if "Zed" in zabaged_gdfs:
-        plot_masked(sym_key='sym513-1a', zorder=30, mask=None, gdf=zabaged_gdfs["Zed"], ax=ax, to_mask=False)
-        plot_masked(sym_key='sym513-1b', zorder=30, mask=None, gdf=zabaged_gdfs["Zed"], ax=ax, to_mask=False)
-    if "Hrad" in zabaged_gdfs:
-        plot_masked(sym_key='sym513-1a', zorder=30, mask=None, gdf=zabaged_gdfs["Hrad"], ax=ax, to_mask=False)
-        plot_masked(sym_key='sym513-1b', zorder=30, mask=None, gdf=zabaged_gdfs["Hrad"], ax=ax, to_mask=False)
-    if "Zamek" in zabaged_gdfs:
-        plot_masked(sym_key='sym513-1a', zorder=30, mask=None, gdf=zabaged_gdfs["Zamek"], ax=ax, to_mask=False)
-        plot_masked(sym_key='sym513-1b', zorder=30, mask=None, gdf=zabaged_gdfs["Zamek"], ax=ax, to_mask=False)
-    if "PrehradniHrazJez" in zabaged_gdfs:
-        plot_masked(sym_key='sym513-1a', zorder=30, mask=None, gdf=zabaged_gdfs["PrehradniHrazJez"], ax=ax, to_mask=False)
-        plot_masked(sym_key='sym513-1b', zorder=30, mask=None, gdf=zabaged_gdfs["PrehradniHrazJez"], ax=ax, to_mask=False)
-    else:
-        mask_wall_low = (
-            (barrier == "wall")
-        )
-        plot_masked(sym_key='sym513-1a', zorder=30, mask=mask_wall_low, gdf=gdf_lines, ax=ax) 
-        plot_masked(sym_key='sym513-1b', zorder=30, mask=mask_wall_low, gdf=gdf_lines, ax=ax) 
+    if visibility.get("man_made", True):
+        # cable_low
+        if "ElektrickeVedeni" in zabaged_gdfs:
+            mask = (
+                (~get_col(zabaged_gdfs["ElektrickeVedeni"], "napeti").isin(["400", "110"]))
+            )
+            plot_masked(sym_key='sym510', zorder=70, mask=mask, gdf=zabaged_gdfs["ElektrickeVedeni"], ax=ax)
+            pass
+        if "LanovaDrahaLyzarskyVlek" in zabaged_gdfs:
+            plot_masked(sym_key='sym510', zorder=70, mask=None, gdf=zabaged_gdfs["LanovaDrahaLyzarskyVlek"], ax=ax, to_mask=False)
+            pass
+        if "ElektrickeVedeni" not in zabaged_gdfs and "LanovaDrahaLyzarskyVlek" not in zabaged_gdfs:
+            mask_cable_low = (
+                (power == "low") | (aerialway.isin(["line", "cable_car", "gondola", "mixed_lift", "chair_lift", "chair_lift", "drag_lift", "t-bar", "j-bar", "platter", "rope_tow", "zip_line", "goods"]))
+            )
+            plot_masked(sym_key='sym510', zorder=70, mask=mask_cable_low, gdf=gdf_lines, ax=ax)
+        # cable_tower
+        if "StozarElektrickehoVedeni" in zabaged_gdfs:
+            pass
+            plot_masked(sym_key='sym511P', zorder=70, mask=None, gdf=zabaged_gdfs["StozarElektrickehoVedeni"], ax=ax, to_mask=False)
+        if "StozarLanoveDrahy" in zabaged_gdfs:
+            pass
+            plot_masked(sym_key='sym511P', zorder=70, mask=None, gdf=zabaged_gdfs["StozarLanoveDrahy"], ax=ax, to_mask=False)
+        if "StozarElektrickehoVedeni" not in zabaged_gdfs and "StozarLanoveDrahy" not in zabaged_gdfs:
+            mask_cable_tower = (
+                (aerialway == "pylon") | (man_made == "utility_pole") | (power.isin(["tower", "pole"]))
+            )
+            plot_masked(sym_key='sym511P', zorder=70, mask=mask_cable_tower, gdf=gdf_centroids, ax=ax)
+        # cable_high
+        if "ElektrickeVedeni" in zabaged_gdfs:
+            mask = (
+                (get_col(zabaged_gdfs["ElektrickeVedeni"], "napeti").isin(["400", "110"]))
+            )
+            plot_masked(sym_key='sym510', zorder=70, mask=mask, gdf=zabaged_gdfs["ElektrickeVedeni"], ax=ax)
+            pass
+        else:
+            mask_cable_high = (
+                (power.isin(["line", "minor_line"]))
+            )
+            plot_masked(sym_key='sym510', zorder=70, mask=mask_cable_high, gdf=gdf_lines, ax=ax) #tady asi nema cenu resit co je jaky vedeni a bude lepsi to vykreslovat vsechno jednim
+        # wall_low
+        if "Zed" in zabaged_gdfs:
+            plot_masked(sym_key='sym513-1a', zorder=30, mask=None, gdf=zabaged_gdfs["Zed"], ax=ax, to_mask=False)
+            plot_masked(sym_key='sym513-1b', zorder=30, mask=None, gdf=zabaged_gdfs["Zed"], ax=ax, to_mask=False)
+        if "Hrad" in zabaged_gdfs:
+            plot_masked(sym_key='sym513-1a', zorder=30, mask=None, gdf=zabaged_gdfs["Hrad"], ax=ax, to_mask=False)
+            plot_masked(sym_key='sym513-1b', zorder=30, mask=None, gdf=zabaged_gdfs["Hrad"], ax=ax, to_mask=False)
+        if "Zamek" in zabaged_gdfs:
+            plot_masked(sym_key='sym513-1a', zorder=30, mask=None, gdf=zabaged_gdfs["Zamek"], ax=ax, to_mask=False)
+            plot_masked(sym_key='sym513-1b', zorder=30, mask=None, gdf=zabaged_gdfs["Zamek"], ax=ax, to_mask=False)
+        if "PrehradniHrazJez" in zabaged_gdfs:
+            plot_masked(sym_key='sym513-1a', zorder=30, mask=None, gdf=zabaged_gdfs["PrehradniHrazJez"], ax=ax, to_mask=False)
+            plot_masked(sym_key='sym513-1b', zorder=30, mask=None, gdf=zabaged_gdfs["PrehradniHrazJez"], ax=ax, to_mask=False)
+        else:
+            mask_wall_low = (
+                (barrier == "wall")
+            )
+            plot_masked(sym_key='sym513-1a', zorder=30, mask=mask_wall_low, gdf=gdf_lines, ax=ax) 
+            plot_masked(sym_key='sym513-1b', zorder=30, mask=mask_wall_low, gdf=gdf_lines, ax=ax) 
 
-    # retaining_wall  
-    mask_retwall = (
-        (barrier == "retaining_wall")
-    )
-    #TODO: plot_masked(sym_key='sym513-2', zorder=30, mask=mask_retwall, gdf=gdf_lines, ax=ax)
-    # wall_high
-    if "HradbaValBastaOpevneni" in zabaged_gdfs:
-        plot_masked(sym_key='sym515a', zorder=30, mask=None, gdf=zabaged_gdfs["HradbaValBastaOpevneni"], ax=ax, to_mask=False)
-        plot_masked(sym_key='sym515b', zorder=30, mask=None, gdf=zabaged_gdfs["HradbaValBastaOpevneni"], ax=ax, to_mask=False)
-
-        pass
-    else:
-        mask_wall_high = (
-            (barrier.isin(["city_wall"]))
+        # retaining_wall  
+        mask_retwall = (
+            (barrier == "retaining_wall")
         )
-        plot_masked(sym_key='sym515a', zorder=30, mask=mask_wall_high, gdf=gdf_lines, ax=ax)
-        plot_masked(sym_key='sym515b', zorder=30, mask=mask_wall_high, gdf=gdf_lines, ax=ax)
+        #TODO: plot_masked(sym_key='sym513-2', zorder=30, mask=mask_retwall, gdf=gdf_lines, ax=ax)
+        # wall_high
+        if "HradbaValBastaOpevneni" in zabaged_gdfs:
+            plot_masked(sym_key='sym515a', zorder=30, mask=None, gdf=zabaged_gdfs["HradbaValBastaOpevneni"], ax=ax, to_mask=False)
+            plot_masked(sym_key='sym515b', zorder=30, mask=None, gdf=zabaged_gdfs["HradbaValBastaOpevneni"], ax=ax, to_mask=False)
 
-    # fence_low
-    mask_fence_low = (
-        (barrier.isin(["cable_barrier", "guard_rail", "hand_rail", "chain", "rope", "jersey_barrier"]))
-    )
-    #TODO: plot_masked(sym_key='sym516', zorder=30, mask=mask_fence_low, gdf=gdf_lines, ax=ax)
-    # fence_high
-    mask_fence_high = (
-        (barrier == "fence")
-    )
-    #TODO: plot_masked(sym_key='sym518', zorder=30, mask=mask_fence_high, gdf=gdf_lines, ax=ax)
-    # gate
-    mask_gate = (
-        (barrier.isin(["entrance", "gate", "stile", "wicket_gate", "full-height_turnstile"]))
-    ) # NOT SURE HOW TO EFFICIENTLY DESIGN A SYMBOL
-    #TODO: plot_masked(sym_key='sym519', zorder=31, mask=mask_gate, gdf=gdf_centroids, ax=ax)
+            pass
+        else:
+            mask_wall_high = (
+                (barrier.isin(["city_wall"]))
+            )
+            plot_masked(sym_key='sym515a', zorder=30, mask=mask_wall_high, gdf=gdf_lines, ax=ax)
+            plot_masked(sym_key='sym515b', zorder=30, mask=mask_wall_high, gdf=gdf_lines, ax=ax)
+
+        # fence_low
+        mask_fence_low = (
+            (barrier.isin(["cable_barrier", "guard_rail", "hand_rail", "chain", "rope", "jersey_barrier"]))
+        )
+        #TODO: plot_masked(sym_key='sym516', zorder=30, mask=mask_fence_low, gdf=gdf_lines, ax=ax)
+        # fence_high
+        mask_fence_high = (
+            (barrier == "fence")
+        )
+        #TODO: plot_masked(sym_key='sym518', zorder=30, mask=mask_fence_high, gdf=gdf_lines, ax=ax)
+        # gate
+        mask_gate = (
+            (barrier.isin(["entrance", "gate", "stile", "wicket_gate", "full-height_turnstile"]))
+        ) # NOT SURE HOW TO EFFICIENTLY DESIGN A SYMBOL
+        #TODO: plot_masked(sym_key='sym519', zorder=31, mask=mask_gate, gdf=gdf_centroids, ax=ax)
+        if "RozvalinaZricenina" in zabaged_gdfs:
+            plot_masked(sym_key='sym523', zorder=35, mask=None, gdf=zabaged_gdfs["RozvalinaZricenina"], ax=ax, to_mask=False)
+        else:
+            mask_ruin = (
+                (building == "ruins") | (historic == "ruins") 
+            )
+            plot_masked(sym_key='sym523', zorder=35, mask=mask_ruin, gdf=gdf_polygons, ax=ax)
+        # tower_high
+        if "Silo" in zabaged_gdfs:
+            plot_masked(sym_key='524a', zorder=56, mask=None, gdf=zabaged_gdfs["Silo"], ax=ax, to_mask=False)
+            plot_masked(sym_key='524b', zorder=56, mask=None, gdf=zabaged_gdfs["Silo"], ax=ax, to_mask=False)
+        if "TezniVez" in zabaged_gdfs:
+            plot_masked(sym_key='524a', zorder=56, mask=None, gdf=zabaged_gdfs["TezniVez"], ax=ax, to_mask=False)
+            plot_masked(sym_key='524b', zorder=56, mask=None, gdf=zabaged_gdfs["TezniVez"], ax=ax, to_mask=False)
+        if "TovarniKomin" in zabaged_gdfs:
+            plot_masked(sym_key='524a', zorder=56, mask=None, gdf=zabaged_gdfs["TovarniKomin"], ax=ax, to_mask=False)
+            plot_masked(sym_key='524b', zorder=56, mask=None, gdf=zabaged_gdfs["TovarniKomin"], ax=ax, to_mask=False)
+        if "VetrnyMotor" in zabaged_gdfs:
+            plot_masked(sym_key='524a', zorder=56, mask=None, gdf=zabaged_gdfs["VetrnyMotor"], ax=ax, to_mask=False)
+            plot_masked(sym_key='524b', zorder=56, mask=None, gdf=zabaged_gdfs["VetrnyMotor"], ax=ax, to_mask=False)
+        if "VetrnyMlyn" in zabaged_gdfs:
+            plot_masked(sym_key='524a', zorder=56, mask=None, gdf=zabaged_gdfs["VetrnyMlyn"], ax=ax, to_mask=False)
+            plot_masked(sym_key='524b', zorder=56, mask=None, gdf=zabaged_gdfs["VetrnyMlyn"], ax=ax, to_mask=False)
+        if "VodojemVezovy" in zabaged_gdfs:
+            plot_masked(sym_key='524a', zorder=56, mask=None, gdf=zabaged_gdfs["VodojemVezovy"], ax=ax, to_mask=False)
+            plot_masked(sym_key='524b', zorder=56, mask=None, gdf=zabaged_gdfs["VodojemVezovy"], ax=ax, to_mask=False)
+        if "VezovitaStavba" in zabaged_gdfs:
+            plot_masked(sym_key='524a', zorder=56, mask=None, gdf=zabaged_gdfs["VezovitaStavba"], ax=ax, to_mask=False)
+            plot_masked(sym_key='524b', zorder=56, mask=None, gdf=zabaged_gdfs["VezovitaStavba"], ax=ax, to_mask=False)
+        if "Silo" not in zabaged_gdfs and "TezniVez" not in zabaged_gdfs and "TovarniKomin" not in zabaged_gdfs and "VetrnyMotor" not in zabaged_gdfs and "VodojemVezovy" not in zabaged_gdfs:
+            mask_tower_high = (
+                (man_made.isin(["tower", "transformer_tower", "water_tower", "communications_tower", "mast", "chimney", "crane", "flagpole", "obelisk"])) |
+                (historic == "round_tower")                                                
+            )
+            plot_masked(sym_key='sym524a', zorder=56, mask=mask_tower_high, gdf=gdf_points, ax=ax)
+            plot_masked(sym_key='sym524b', zorder=56, mask=mask_tower_high, gdf=gdf_points, ax=ax)
+        # tower_low
+            mask_tower_low = (
+                (man_made.isin(["column", "beacon", "lighthouse"])) |
+                (amenity == "hunting_stand") | (building == "clock_tower")                                               
+            )
+            plot_masked(sym_key='sym525', zorder=56, mask=mask_tower_low, gdf=gdf_points, ax=ax)
+        # memorial
+        if "BodPolohovehoBodovehoPole" in zabaged_gdfs: #Tohle se pro OB nemapuje
+            #plot_masked(sym_key='sym526a', zorder=56, mask=None, gdf=zabaged_gdfs["BodPolohovehoBodovehoPole"], ax=ax, to_mask=False)
+            #plot_masked(sym_key='sym526b', zorder=56, mask=None, gdf=zabaged_gdfs["BodPolohovehoBodovehoPole"], ax=ax, to_mask=False)
+            pass
+        if "BodZakladnihoTihovehoBodovehoPole" in zabaged_gdfs: #Tohle se pro OB nemapuje
+            #plot_masked(sym_key='sym526a', zorder=56, mask=None, gdf=zabaged_gdfs["BodZakladnihoTihovehoBodovehoPole"], ax=ax, to_mask=False)
+            #plot_masked(sym_key='sym526b', zorder=56, mask=None, gdf=zabaged_gdfs["BodZakladnihoTihovehoBodovehoPole"], ax=ax, to_mask=False)
+            pass
+        if "MohylaPomnikNahrobek" in zabaged_gdfs:
+            plot_masked(sym_key='sym526a', zorder=56, mask=None, gdf=zabaged_gdfs["MohylaPomnikNahrobek"], ax=ax, to_mask=False)
+            plot_masked(sym_key='sym526b', zorder=56, mask=None, gdf=zabaged_gdfs["MohylaPomnikNahrobek"], ax=ax, to_mask=False)
+            pass
+        if "BodPolohovehoBodovehoPole" not in zabaged_gdfs and "BodZakladnihoTihovehoBodovehoPole" not in zabaged_gdfs and "MohylaPomnikNahrobek" not in zabaged_gdfs:
+            mask_memorial = (
+                (historic.isin(["boundary_stone", "memorial", "wayside_cross"])) |
+                (man_made == "survey_point") &
+                (~building.isin(["plaque"]))                                           
+            )
+            plot_masked(sym_key='sym526a', zorder=56, mask=mask_memorial, gdf=gdf_centroids, ax=ax)
+            plot_masked(sym_key='sym526b', zorder=56, mask=mask_memorial, gdf=gdf_centroids, ax=ax)
+        # pipe
+        if "DalkovyProduktovodDalkovePotrubi" in zabaged_gdfs:
+            # TODO: plot_masked(sym_key='sym528', zorder=56, mask=None, gdf=zabaged_gdfs["DalkovyProduktovodDalkovePotrubi"], ax=ax, to_mask=False)
+            pass
+        if "DopravnikovyPas" in zabaged_gdfs:
+            # TODO: plot_masked(sym_key='sym528', zorder=56, mask=None, gdf=zabaged_gdfs["DopravnikovyPas"], ax=ax, to_mask=False)
+            pass
+        if "DalkovyProduktovodDalkovePotrubi" not in zabaged_gdfs and "DopravnikovyPas" not in zabaged_gdfs:
+            mask_pipe = (
+                (man_made.isin(["goods_conveyor", "pipeline"]))                                              
+            )
+            #plot_masked(sym_key='sym528', zorder=56, mask=mask_pipe, gdf=gdf_lines, ax=ax)
+            pass
+        # circle
+        if "Bunkr" in zabaged_gdfs:
+            plot_masked(sym_key='sym523', zorder=56, mask=None, gdf=zabaged_gdfs["Bunkr"], ax=ax, to_mask=False)
+            pass
+        else:
+            mask_circle = (
+                (military == "bunker")                                               
+            )
+            plot_masked(sym_key='sym523', zorder=56, mask=mask_circle, gdf=gdf_points, ax=ax)
+        # cross
+        if "KrizSloupKulturnihoVyznamu" in zabaged_gdfs:
+            plot_masked(sym_key='sym531', zorder=56, mask=None, gdf=zabaged_gdfs["KrizSloupKulturnihoVyznamu"], ax=ax, to_mask=False)
+            pass
+        else:
+            mask_cross = (
+                (man_made == "cross")                                               
+            )
+            plot_masked(sym_key='sym531', zorder=56, mask=mask_cross, gdf=gdf_centroids, ax=ax)
+        # stairs
+        mask_stairs = (
+            (highway == "steps")                                               
+        )
+        plot_masked(sym_key='sym532a', zorder=49, mask=mask_stairs, gdf=gdf_lines, ax=ax)
+        plot_masked(sym_key='sym532b', zorder=50, mask=mask_stairs, gdf=gdf_lines, ax=ax)
+        plot_masked(sym_key='sym532c', zorder=51, mask=mask_stairs, gdf=gdf_lines, ax=ax)
   
-    # GARDENS ======================================================================    
-    # garden_etc
-    gardens_not_from_zabaged = True
-    if "Hrbitov" in zabaged_gdfs:
-        plot_masked(sym_key='sym520', zorder=1.5, mask=None, gdf=zabaged_gdfs["Hrbitov"], ax=ax, to_mask=False)
-        gardens_not_from_zabaged = False
-    if "Kolejiste" in zabaged_gdfs:
-        plot_masked(sym_key='sym520', zorder=1.5, mask=None, gdf=zabaged_gdfs["Kolejiste"], ax=ax, to_mask=False)
-        gardens_not_from_zabaged = False
-    if "Letiste" in zabaged_gdfs:
-        plot_masked(sym_key='sym520', zorder=1.5, mask=None, gdf=zabaged_gdfs["Letiste"], ax=ax, to_mask=False)
-        gardens_not_from_zabaged = False
-    if "OstatniPlochaVSidlech" in zabaged_gdfs:
-        plot_masked(sym_key='sym520', zorder=1.5, mask=None, gdf=zabaged_gdfs["OstatniPlochaVSidlech"], ax=ax, to_mask=False)
-        gardens_not_from_zabaged = False
-    if "OvocnySadZahrada" in zabaged_gdfs:
-        plot_masked(sym_key='sym520', zorder=1.5, mask=None, gdf=zabaged_gdfs["OvocnySadZahrada"], ax=ax, to_mask=False)
-        gardens_not_from_zabaged = False
-    if "PovrchovaTezbaLom" in zabaged_gdfs:
-        plot_masked(sym_key='sym520', zorder=1.5, mask=None, gdf=zabaged_gdfs["PovrchovaTezbaLom"], ax=ax, to_mask=False)
-        gardens_not_from_zabaged = False
-    if "ArealUceloveZastavby" in zabaged_gdfs:
-        plot_masked(sym_key='sym520', zorder=1.5, mask=None, gdf=zabaged_gdfs["ArealUceloveZastavby"], ax=ax, to_mask=False)
-        gardens_not_from_zabaged = False    
-    if "Skladka" in zabaged_gdfs:
-        plot_masked(sym_key='sym520', zorder=1.5, mask=None, gdf=zabaged_gdfs["Skladka"], ax=ax, to_mask=False)
-        gardens_not_from_zabaged = False
-    if gardens_not_from_zabaged:
-        mask_garden = (
-            (landuse.isin(["residential", "allotments", "brownfield", "military", "commercial", "construction", "industrial", "retail", "education", "animal_keeping", "cemetery", "landfill", "quarry", "depot", "religious", "farmyard"])) |
-            (leisure == "pitch")                                                
-        )
-        plot_masked(sym_key='sym520', zorder=1.5, mask=mask_garden, gdf=gdf_polygons, ax=ax)
+    # GARDENS ======================================================================  
+    if visibility.get("private", True):  
+        # garden_etc
+        gardens_not_from_zabaged = True
+        if "Hrbitov" in zabaged_gdfs:
+            plot_masked(sym_key='sym520', zorder=1.5, mask=None, gdf=zabaged_gdfs["Hrbitov"], ax=ax, to_mask=False)
+            gardens_not_from_zabaged = False
+        if "Kolejiste" in zabaged_gdfs:
+            plot_masked(sym_key='sym520', zorder=1.5, mask=None, gdf=zabaged_gdfs["Kolejiste"], ax=ax, to_mask=False)
+            gardens_not_from_zabaged = False
+        if "Letiste" in zabaged_gdfs:
+            plot_masked(sym_key='sym520', zorder=1.5, mask=None, gdf=zabaged_gdfs["Letiste"], ax=ax, to_mask=False)
+            gardens_not_from_zabaged = False
+        if "OstatniPlochaVSidlech" in zabaged_gdfs:
+            plot_masked(sym_key='sym520', zorder=1.5, mask=None, gdf=zabaged_gdfs["OstatniPlochaVSidlech"], ax=ax, to_mask=False)
+            gardens_not_from_zabaged = False
+        if "OvocnySadZahrada" in zabaged_gdfs:
+            plot_masked(sym_key='sym520', zorder=1.5, mask=None, gdf=zabaged_gdfs["OvocnySadZahrada"], ax=ax, to_mask=False)
+            gardens_not_from_zabaged = False
+        if "PovrchovaTezbaLom" in zabaged_gdfs:
+            plot_masked(sym_key='sym520', zorder=1.5, mask=None, gdf=zabaged_gdfs["PovrchovaTezbaLom"], ax=ax, to_mask=False)
+            gardens_not_from_zabaged = False
+        if "Elektrarna" in zabaged_gdfs:
+            plot_masked(sym_key='sym520', zorder=1.5, mask=None, gdf=zabaged_gdfs["PovrchovaTezbaLom"], ax=ax, to_mask=False)
+            gardens_not_from_zabaged = False
+        if "ArealUceloveZastavby" in zabaged_gdfs:
+            plot_masked(sym_key='sym520', zorder=1.5, mask=None, gdf=zabaged_gdfs["ArealUceloveZastavby"], ax=ax, to_mask=False)
+            gardens_not_from_zabaged = False    
+        if "Skladka" in zabaged_gdfs:
+            plot_masked(sym_key='sym520', zorder=1.5, mask=None, gdf=zabaged_gdfs["Skladka"], ax=ax, to_mask=False)
+            gardens_not_from_zabaged = False
+        if gardens_not_from_zabaged:
+            mask_garden = (
+                (landuse.isin(["residential", "allotments", "brownfield", "military", "commercial", "construction", "industrial", "retail", "education", "animal_keeping", "cemetery", "landfill", "quarry", "depot", "religious", "farmyard"])) |
+                (leisure == "pitch")                                                
+            )
+            plot_masked(sym_key='sym520', zorder=1.5, mask=mask_garden, gdf=gdf_polygons, ax=ax)
         
     # BUILDINGS ======================================================================
-    # building
-    if "BudovaJednotlivaNeboBlokBudov" in zabaged_gdfs:
-        plot_masked(sym_key='sym521', zorder=37, mask=None, gdf=zabaged_gdfs["BudovaJednotlivaNeboBlokBudov"], ax=ax, to_mask=False)
-    else:
-        mask_building = (
-            (building.notna()) &
-            (building != '') &
-            (~building.isin(["roof", "ruins"])) 
+    if visibility.get("buildings", True):
+        # building
+        if "BudovaJednotlivaNeboBlokBudov" in zabaged_gdfs:
+            plot_masked(sym_key='sym521', zorder=37, mask=None, gdf=zabaged_gdfs["BudovaJednotlivaNeboBlokBudov"], ax=ax, to_mask=False)
+        else:
+            mask_building = (
+                (building.notna()) &
+                (building != '') &
+                (~building.isin(["roof", "ruins"])) 
+            )
+            plot_masked(sym_key='sym521', zorder=37, mask=mask_building, gdf=gdf_polygons, ax=ax)
+        # roof
+        mask_roof = (
+            (building == "roof") 
         )
-        plot_masked(sym_key='sym521', zorder=37, mask=mask_building, gdf=gdf_polygons, ax=ax)
-    # roof
-    mask_roof = (
-        (building == "roof") 
-    )
-    plot_masked(sym_key='sym522', zorder=36, mask=mask_roof, gdf=gdf_polygons, ax=ax)
+        plot_masked(sym_key='sym522', zorder=36, mask=mask_roof, gdf=gdf_polygons, ax=ax)
     
-    if "RozvalinaZricenina" in zabaged_gdfs:
-        plot_masked(sym_key='sym523', zorder=35, mask=None, gdf=zabaged_gdfs["RozvalinaZricenina"], ax=ax, to_mask=False)
-    else:
-        mask_ruin = (
-            (building == "ruins") | (historic == "ruins") 
-        )
-        plot_masked(sym_key='sym523', zorder=35, mask=mask_ruin, gdf=gdf_polygons, ax=ax)
-    # tower_high
-    if "Silo" in zabaged_gdfs:
-        plot_masked(sym_key='524a', zorder=56, mask=None, gdf=zabaged_gdfs["Silo"], ax=ax, to_mask=False)
-        plot_masked(sym_key='524b', zorder=56, mask=None, gdf=zabaged_gdfs["Silo"], ax=ax, to_mask=False)
-        pass
-    if "TezniVez" in zabaged_gdfs:
-        plot_masked(sym_key='524a', zorder=56, mask=None, gdf=zabaged_gdfs["TezniVez"], ax=ax, to_mask=False)
-        plot_masked(sym_key='524b', zorder=56, mask=None, gdf=zabaged_gdfs["TezniVez"], ax=ax, to_mask=False)
-        pass
-    if "TovarniKomin" in zabaged_gdfs:
-        plot_masked(sym_key='524a', zorder=56, mask=None, gdf=zabaged_gdfs["TovarniKomin"], ax=ax, to_mask=False)
-        plot_masked(sym_key='524b', zorder=56, mask=None, gdf=zabaged_gdfs["TovarniKomin"], ax=ax, to_mask=False)
-        pass
-    if "VetrnyMotor" in zabaged_gdfs:
-        plot_masked(sym_key='524a', zorder=56, mask=None, gdf=zabaged_gdfs["VetrnyMotor"], ax=ax, to_mask=False)
-        plot_masked(sym_key='524b', zorder=56, mask=None, gdf=zabaged_gdfs["VetrnyMotor"], ax=ax, to_mask=False)
-        pass
-    if "VetrnyMlyn" in zabaged_gdfs:
-        plot_masked(sym_key='524a', zorder=56, mask=None, gdf=zabaged_gdfs["VetrnyMlyn"], ax=ax, to_mask=False)
-        plot_masked(sym_key='524b', zorder=56, mask=None, gdf=zabaged_gdfs["VetrnyMlyn"], ax=ax, to_mask=False)
-        pass
-    if "VodojemVezovy" in zabaged_gdfs:
-        plot_masked(sym_key='524a', zorder=56, mask=None, gdf=zabaged_gdfs["VodojemVezovy"], ax=ax, to_mask=False)
-        plot_masked(sym_key='524b', zorder=56, mask=None, gdf=zabaged_gdfs["VodojemVezovy"], ax=ax, to_mask=False)
-    if "VezovitaStavba" in zabaged_gdfs:
-        plot_masked(sym_key='524a', zorder=56, mask=None, gdf=zabaged_gdfs["VezovitaStavba"], ax=ax, to_mask=False)
-        plot_masked(sym_key='524b', zorder=56, mask=None, gdf=zabaged_gdfs["VezovitaStavba"], ax=ax, to_mask=False)
-    if "Silo" not in zabaged_gdfs and "TezniVez" not in zabaged_gdfs and "TovarniKomin" not in zabaged_gdfs and "VetrnyMotor" not in zabaged_gdfs and "VodojemVezovy" not in zabaged_gdfs:
-        mask_tower_high = (
-            (man_made.isin(["tower", "transformer_tower", "water_tower", "communications_tower", "mast", "chimney", "crane", "flagpole", "obelisk"])) |
-            (historic == "round_tower")                                                
-        )
-        plot_masked(sym_key='sym524a', zorder=56, mask=mask_tower_high, gdf=gdf_centroids, ax=ax)
-        plot_masked(sym_key='sym524b', zorder=56, mask=mask_tower_high, gdf=gdf_centroids, ax=ax)
-    # tower_low
-        mask_tower_low = (
-            (man_made.isin(["column", "beacon", "lighthouse"])) |
-            (amenity == "hunting_stand") | (building == "clock_tower")                                               
-        )
-        plot_masked(sym_key='sym525', zorder=56, mask=mask_tower_low, gdf=gdf_centroids, ax=ax)
-    # memorial
-    if "BodPolohovehoBodovehoPole" in zabaged_gdfs: #Tohle se pro OB nemapuje
-        #plot_masked(sym_key='sym526a', zorder=56, mask=None, gdf=zabaged_gdfs["BodPolohovehoBodovehoPole"], ax=ax, to_mask=False)
-        #plot_masked(sym_key='sym526b', zorder=56, mask=None, gdf=zabaged_gdfs["BodPolohovehoBodovehoPole"], ax=ax, to_mask=False)
-        pass
-    if "BodZakladnihoTihovehoBodovehoPole" in zabaged_gdfs: #Tohle se pro OB nemapuje
-        #plot_masked(sym_key='sym526a', zorder=56, mask=None, gdf=zabaged_gdfs["BodZakladnihoTihovehoBodovehoPole"], ax=ax, to_mask=False)
-        #plot_masked(sym_key='sym526b', zorder=56, mask=None, gdf=zabaged_gdfs["BodZakladnihoTihovehoBodovehoPole"], ax=ax, to_mask=False)
-        pass
-    if "MohylaPomnikNahrobek" in zabaged_gdfs:
-        plot_masked(sym_key='sym526a', zorder=56, mask=None, gdf=zabaged_gdfs["MohylaPomnikNahrobek"], ax=ax, to_mask=False)
-        plot_masked(sym_key='sym526b', zorder=56, mask=None, gdf=zabaged_gdfs["MohylaPomnikNahrobek"], ax=ax, to_mask=False)
-        pass
-    if "BodPolohovehoBodovehoPole" not in zabaged_gdfs and "BodZakladnihoTihovehoBodovehoPole" not in zabaged_gdfs and "MohylaPomnikNahrobek" not in zabaged_gdfs:
-        mask_memorial = (
-            (historic.isin(["boundary_stone", "memorial"])) |
-            (man_made == "survey_point") &
-            (~building.isin(["plaque"]))                                           
-        )
-        plot_masked(sym_key='sym526a', zorder=56, mask=mask_memorial, gdf=gdf_centroids, ax=ax)
-        plot_masked(sym_key='sym526b', zorder=56, mask=mask_memorial, gdf=gdf_centroids, ax=ax)
-    # pipe
-    if "DalkovyProduktovodDalkovePotrubi" in zabaged_gdfs:
-        # TODO: plot_masked(sym_key='sym528', zorder=56, mask=None, gdf=zabaged_gdfs["DalkovyProduktovodDalkovePotrubi"], ax=ax, to_mask=False)
-        pass
-    if "DopravnikovyPas" in zabaged_gdfs:
-        # TODO: plot_masked(sym_key='sym528', zorder=56, mask=None, gdf=zabaged_gdfs["DopravnikovyPas"], ax=ax, to_mask=False)
-        pass
-    if "DalkovyProduktovodDalkovePotrubi" not in zabaged_gdfs and "DopravnikovyPas" not in zabaged_gdfs:
-        mask_pipe = (
-            (man_made.isin(["goods_conveyor", "pipeline"]))                                              
-        )
-        #plot_masked(sym_key='sym528', zorder=56, mask=mask_pipe, gdf=gdf_lines, ax=ax)
-        pass
-    # circle
-    if "Bunkr" in zabaged_gdfs:
-        plot_masked(sym_key='sym523', zorder=56, mask=None, gdf=zabaged_gdfs["Bunkr"], ax=ax, to_mask=False)
-        pass
-    else:
-        mask_circle = (
-            (military == "bunker")                                               
-        )
-        plot_masked(sym_key='sym523', zorder=56, mask=mask_circle, gdf=gdf_centroids, ax=ax)
-    # cross
-    if "KrizSloupKulturnihoVyznamu" in zabaged_gdfs:
-        plot_masked(sym_key='sym531', zorder=56, mask=None, gdf=zabaged_gdfs["KrizSloupKulturnihoVyznamu"], ax=ax, to_mask=False)
-        pass
-    else:
-        mask_cross = (
-            (man_made == "cross")                                               
-        )
-        plot_masked(sym_key='sym531', zorder=56, mask=mask_cross, gdf=gdf_centroids, ax=ax)
-    # stairs
-    mask_stairs = (
-        (highway == "steps")                                               
-    )
-    plot_masked(sym_key='sym532a', zorder=49, mask=mask_stairs, gdf=gdf_lines, ax=ax)
-    plot_masked(sym_key='sym532b', zorder=50, mask=mask_stairs, gdf=gdf_lines, ax=ax)
-    plot_masked(sym_key='sym532c', zorder=51, mask=mask_stairs, gdf=gdf_lines, ax=ax);
+    
 
     # if not power_towers.empty:
     #     symbol_id = 'power_tower'
@@ -2077,13 +2084,16 @@ def setup_map_figure(extent_original_data, paper_format="A4 (Landscape)"):
 
 def run_main_analysis():
     global SCALE, SYMBOL_LIBRARY, CURRENT_CRS  
-    selected_crs = crs_var.get()
-    if not selected_crs:
-        CURRENT_CRS = "EPSG:5514" 
+    selected_crs_label = crs_var.get()
+    if selected_crs_label in CRS_MAP:
+        CURRENT_CRS = CRS_MAP[selected_crs_label]
     else:
-        CURRENT_CRS = selected_crs
+        CURRENT_CRS = selected_crs_label
+    if not CURRENT_CRS:
+        CURRENT_CRS = "EPSG:5514"
     print(f"--- START ANALÝZY ---")
-    print(f"Cílový souřadnicový systém: {CURRENT_CRS}")  
+    print(f"Vybraný systém: {selected_crs_label}")
+    print(f"Kód CRS pro výpočet: {CURRENT_CRS}")
     selected_scale = scale_var.get()
     if selected_scale == "1:10 000":
         SCALE = 10000
@@ -2091,12 +2101,6 @@ def run_main_analysis():
     else: # Default 1:15 000
         SCALE = 15000
         xml_file = "symbols15.xml"
-    # NAČTENÍ CRS Z GUI
-    selected_crs = crs_var.get()
-    if not selected_crs:
-        CURRENT_CRS = "EPSG:5514" # Fallback
-    else:
-        CURRENT_CRS = selected_crs
         
     print(f"Nastaveno CRS: {CURRENT_CRS}")    
     print(f"Nastaveno měřítko 1:{SCALE}. Načítám knihovnu: {xml_file}")
@@ -2283,7 +2287,6 @@ def run_main_analysis():
 
                 try:
                     # 1. Zjistíme CRS souboru, aniž bychom ho celý četli
-                    import fiona
                     with fiona.open(path) as src:
                         file_crs_wkt = src.crs_wkt
                         if not file_crs_wkt: 
@@ -2438,7 +2441,7 @@ def run_main_analysis():
             root.after(2000, lambda: status_label.config(text="Done.", foreground="darkgreen"))
             return 
 
-        # --- GENEROWÁNÍ JEDNÉ MAPY (BEZ DLAŽDIC) ---
+        # --- GENEROWÁNÍ MAPY ---
         print("Zahajuji generování finální mapy...")
         status_label.config(text="Generuji kompozici mapy...")
         root.update_idletasks()
@@ -2449,7 +2452,17 @@ def run_main_analysis():
         
         # Ořezový box pro data
         clip_box_map = box(map_minx, map_miny, map_maxx, map_maxy)
-        add_magnetic_north_lines(ax, map_extent, SCALE, spacing_mm=30, zorder=15)
+
+        # --- SEVEROJIŽNÍ ČÁRY ---
+        if LAYER_VISIBILITY["magnetic_lines"].get():
+            # Načtení hodnoty z GUI
+            try:
+                rot_str = north_rotation_entry.get().replace(",", ".")
+                north_rotation = float(rot_str)
+            except ValueError:
+                print("Neplatná hodnota rotace, používám 0°.")
+                north_rotation = 0.0
+            add_magnetic_north_lines(ax, map_extent, SCALE, rotation=north_rotation, spacing_mm=30, zorder=15)
         # Aplikace ořezové masky (Convex Hull) na celé plátno
         if clip_polygon:
             try:
@@ -2460,63 +2473,65 @@ def run_main_analysis():
                 print(f"  -> CHYBA: Nepodařilo se aplikovat ořezovou masku: {e}")
 
         # 2. Kreslení VEGETACE
-        status_label.config(text="Kreslím vegetaci...")
-        root.update_idletasks()
+        if LAYER_VISIBILITY["vegetation"].get():
+            status_label.config(text="Kreslím vegetaci...")
+            root.update_idletasks()
+            
+            if not gdf_vegetation.empty:
+                try:
+                    veg_data_only = gdf_vegetation[gdf_vegetation['class_name'] != 'Mimo_data']
+                    if not veg_data_only.empty:
+                        veg_clipped = gpd.clip(veg_data_only, clip_box_map)
+                        if not veg_clipped.empty:
+                            plot_order = [
+                                (['Paseka', 'Louka'], 1.0),
+                                (['Les'], 1.1),
+                                (['Vysoky_porost'], 1.2),
+                                (['Stredni_porost'], 1.3),
+                                (['Nizky_porost'], 1.4)
+                            ]
+                            for class_list, z_level in plot_order:
+                                subset_gdf = veg_clipped[veg_clipped['class_name'].isin(class_list)]
+                                if not subset_gdf.empty:
+                                    subset_colors = subset_gdf['class_name'].map(color_map).fillna('#FF00FF')
+                                    subset_gdf.plot(ax=ax, color=subset_colors, zorder=z_level)
+                except Exception as e:
+                    print(f"  -> Chyba při kreslení vegetace: {e}")
+
+        # 3. Kreslení SKAL A VRSTEVNIC
+        if LAYER_VISIBILITY["rocks"].get():
+            if not gdf_rocks.empty:
+                try:
+                    rocks_clipped = gpd.clip(gdf_rocks, clip_box_map)
+                    if not rocks_clipped.empty:
+                        rocks_clipped.plot(ax=ax, color='black', zorder=26)
+                except Exception as e:
+                    print(f"  -> Chyba při kreslení skal: {e}")
+
+            status_label.config(text="Kreslím vrstevnice...")
+            root.update_idletasks()
+            # Předáváme fixní pixel size
+            add_contour_lines(ax, grid_x, grid_y, dmr_grid_cubic_viz) 
+            '''
+            # 5. Kreslení PRVKŮ (Kupky, prohlubně)
+            status_label.config(text="Kreslím terénní detaily...")
+            root.update_idletasks()
+            add_depressions(ax, grid_x, grid_y, dmr_grid_linear_viz_features, 
+                            pixel_size=FIXED_PIXEL_SIZE, 
+                            min_diameter=0.5, max_diameter=3, min_depth=0.2)
+            '''               
+            add_knoll_symbols(ax, grid_x, grid_y, dmr_grid_linear_viz_features, 
+                            pixel_size=FIXED_PIXEL_SIZE)
         
-        if not gdf_vegetation.empty:
-            try:
-                veg_data_only = gdf_vegetation[gdf_vegetation['class_name'] != 'Mimo_data']
-                if not veg_data_only.empty:
-                    veg_clipped = gpd.clip(veg_data_only, clip_box_map)
-                    if not veg_clipped.empty:
-                        plot_order = [
-                            (['Paseka', 'Louka'], 1.0),
-                            (['Les'], 1.1),
-                            (['Vysoky_porost'], 1.2),
-                            (['Stredni_porost'], 1.3),
-                            (['Nizky_porost'], 1.4)
-                        ]
-                        for class_list, z_level in plot_order:
-                            subset_gdf = veg_clipped[veg_clipped['class_name'].isin(class_list)]
-                            if not subset_gdf.empty:
-                                subset_colors = subset_gdf['class_name'].map(color_map).fillna('#FF00FF')
-                                subset_gdf.plot(ax=ax, color=subset_colors, zorder=z_level)
-            except Exception as e:
-                print(f"  -> Chyba při kreslení vegetace: {e}")
-
-        # 3. Kreslení SKAL
-        if not gdf_rocks.empty:
-            try:
-                rocks_clipped = gpd.clip(gdf_rocks, clip_box_map)
-                if not rocks_clipped.empty:
-                    rocks_clipped.plot(ax=ax, color='black', zorder=21)
-            except Exception as e:
-                print(f"  -> Chyba při kreslení skal: {e}")
-
-        # 4. Kreslení VRSTEVNIC
-        status_label.config(text="Kreslím vrstevnice...")
-        root.update_idletasks()
-        # Předáváme fixní pixel size
-        add_contour_lines(ax, grid_x, grid_y, dmr_grid_cubic_viz) 
-
-        # 5. Kreslení PRVKŮ (Kupky, prohlubně)
-        status_label.config(text="Kreslím terénní detaily...")
-        root.update_idletasks()
-        add_depressions(ax, grid_x, grid_y, dmr_grid_linear_viz_features, 
-                        pixel_size=FIXED_PIXEL_SIZE, 
-                        min_diameter=0.5, max_diameter=3, min_depth=0.2)
-                        
-        add_knoll_symbols(ax, grid_x, grid_y, dmr_grid_linear_viz_features, 
-                          pixel_size=FIXED_PIXEL_SIZE)
-
         # 6. Kreslení VEKTORŮ (OSM/Zabaged)
         status_label.config(text="Kreslím cesty a objekty...")
         root.update_idletasks()
+        visibility_settings = {k: v.get() for k, v in LAYER_VISIBILITY.items()}
         if gdf_osm is not None and not gdf_osm.empty:
-            add_vector_layers(ax, gdf_osm.copy(), map_extent, zabaged_gdfs)
+            add_vector_layers(ax, gdf_osm.copy(), map_extent, zabaged_gdfs, dmr_grid_linear_viz_features, grid_x, grid_y, visibility=visibility_settings)
 
         if gdf_other is not None and not gdf_other.empty:
-            add_vector_layers(ax, gdf_other.copy(), map_extent, zabaged_gdfs)
+            add_vector_layers(ax, gdf_other.copy(), map_extent, zabaged_gdfs, dmr_grid_linear_viz_features, grid_x, grid_y, visibility=visibility_settings)
 
         # 7. Uložení FINÁLNÍHO SOUBORU
         output_path = os.path.splitext(dmr_path)[0] + "_OMap.png"
@@ -2526,7 +2541,7 @@ def run_main_analysis():
 
         plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
         # Uložení přímo do cílového souboru
-        plt.savefig(output_path, dpi=600, bbox_inches='tight', pad_inches=0)
+        plt.savefig(output_path, dpi=1000, bbox_inches='tight', pad_inches=0, transparent=True)
         plt.close(fig) 
         
         progress_bar["value"] = 95
@@ -2616,7 +2631,7 @@ middle_container.columnconfigure(1, weight=1)
 middle_container.rowconfigure(0, weight=1) 
 optional_frame = ttk.Labelframe(middle_container, text="Add your files (.shp)", padding="10")
 optional_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5)) 
-ttk.Label(optional_frame, text="Names similar to ISOM 2017-2. Use CamelCase (WaterCourse, NarrowRide, VehicleTrack, ...)").pack(anchor="w", padx=5)
+ttk.Label(optional_frame, text="Data from ZABAGED© (.shp)").pack(anchor="w", padx=5)
 zabaged_list_frame = ttk.Frame(optional_frame)
 zabaged_list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
 zabaged_scrollbar = ttk.Scrollbar(zabaged_list_frame, orient=tk.VERTICAL)
@@ -2642,62 +2657,108 @@ other_shp_entry = ttk.Entry(other_shp_entry_frame, width=70)
 other_shp_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 ttk.Button(other_shp_entry_frame, text="...", width=4, 
            command=lambda: select_file(other_shp_entry, "Chose Shapefile (.shp)", SHP_FILES)).pack(side=tk.RIGHT, padx=(5, 0))
-classify_frame = ttk.Labelframe(middle_container, text="Custom vegetation height (m)", padding="10")
-classify_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
-classify_frame.columnconfigure(1, weight=1)
-ttk.Label(classify_frame, text="Open Land/Rough Open Land:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
-bin_entry_1 = ttk.Entry(classify_frame)
+settings_frame = ttk.Labelframe(middle_container, text="Settings:", padding="10")
+settings_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+settings_frame.columnconfigure(1, weight=1)
+ttk.Label(settings_frame, text="Vegetation height:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+ttk.Label(settings_frame, text="Open Land/Rough Open Land:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+bin_entry_1 = ttk.Entry(settings_frame)
 bin_entry_1.insert(0, "1")
-bin_entry_1.grid(row=0, column=1, sticky="ew", padx=5, pady=5)
-ttk.Label(classify_frame, text="Vegetation: fight").grid(row=1, column=0, sticky="w", padx=5, pady=5)
-bin_entry_2 = ttk.Entry(classify_frame)
+bin_entry_1.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
+ttk.Label(settings_frame, text="Vegetation: fight").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+bin_entry_2 = ttk.Entry(settings_frame)
 bin_entry_2.insert(0, "1.3")
-bin_entry_2.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
-ttk.Label(classify_frame, text="Vegetation: walk").grid(row=2, column=0, sticky="w", padx=5, pady=5)
-bin_entry_3 = ttk.Entry(classify_frame)
+bin_entry_2.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+ttk.Label(settings_frame, text="Vegetation: walk").grid(row=3, column=0, sticky="w", padx=5, pady=5)
+bin_entry_3 = ttk.Entry(settings_frame)
 bin_entry_3.insert(0, "6")
-bin_entry_3.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
-ttk.Label(classify_frame, text="Vegetation: slow running").grid(row=3, column=0, sticky="w", padx=5, pady=5)
-bin_entry_4 = ttk.Entry(classify_frame)
+bin_entry_3.grid(row=3, column=1, sticky="ew", padx=5, pady=5)
+ttk.Label(settings_frame, text="Vegetation: slow running").grid(row=4, column=0, sticky="w", padx=5, pady=5)
+bin_entry_4 = ttk.Entry(settings_frame)
 bin_entry_4.insert(0, "12")
-bin_entry_4.grid(row=3, column=1, sticky="ew", padx=5, pady=5)
-ttk.Label(classify_frame, text="Formát výstupu:").grid(row=4, column=0, sticky="w", padx=5, pady=(15, 5))
+bin_entry_4.grid(row=4, column=1, sticky="ew", padx=5, pady=5)
+ttk.Label(settings_frame, text="Paper format:").grid(row=5, column=0, sticky="w", padx=5, pady=(25, 5))
 paper_format_combo = ttk.Combobox(
-    classify_frame,
+    settings_frame,
     textvariable=paper_format_var,
     values=paper_format_options,
     state="readonly" 
 )
-paper_format_combo.grid(row=4, column=1, sticky="ew", padx=5, pady=(15, 5))
+paper_format_combo.grid(row=5, column=1, sticky="ew", padx=5, pady=(15, 5))
 paper_format_combo.set(paper_format_options[3]) # Výchozí hodnota A4
-ttk.Label(classify_frame, text="Měřítko mapy:").grid(row=6, column=0, sticky="w", padx=5, pady=5)
+ttk.Label(settings_frame, text="Scale:").grid(row=7, column=0, sticky="w", padx=5, pady=5)
 scale_var = tk.StringVar(value="1:10 000") # Výchozí hodnota
 scale_combo = ttk.Combobox(
-    classify_frame,
+    settings_frame,
     textvariable=scale_var,
     values=["1:10 000", "1:15 000"],
     state="readonly"
 )
 # --- PŘIDANÁ ČÁST PRO VÝBĚR CRS ---
-ttk.Label(classify_frame, text="Souřadnicový systém:").grid(row=5, column=0, sticky="w", padx=5, pady=5)
-crs_var = tk.StringVar(value="EPSG:5514") # Výchozí S-JTSK
-crs_options = [
-    "EPSG:5514",  # S-JTSK (ČR)
-    "EPSG:32633", # UTM Zone 33N
-    "EPSG:32634", # UTM Zone 34N
-    "EPSG:2065"   # S-JTSK (Slovensko - JTSK03)
-]
+ttk.Label(settings_frame, text="Cordinate system:").grid(row=6, column=0, sticky="w", padx=5, pady=5)
+CRS_MAP = {
+    "S-JTSK (ČR) [EPSG:5514]": "EPSG:5514",
+    "UTM Zone 29N (Ireland, Portugal) [EPSG:32629]": "EPSG:32629",
+    "UTM Zone 30N (GB, Western France, Spain) [EPSG:32630]": "EPSG:32630",
+    "UTM Zone 31N (Central France, Eastern Spain) [EPSG:32631]": "EPSG:32631",
+    "UTM Zone 32N (Norway, Germany, Switzerland, North-west of Italy) [EPSG:32632]": "EPSG:32632",
+    "UTM Zone 33N (Czechia, Sweden, Slovenia, South-east of Italy) [EPSG:32633]": "EPSG:32633",
+    "UTM Zone 34N (North-east of Sweden, Slovakia, Hungary) [EPSG:32634]": "EPSG:32634",
+    "UTM Zone 35N (Finland, Estonia, Latvia, Lithuania, Romania) [EPSG:32635]": "EPSG:32635",
+    "S-JTSK (Slovensko - JTSK03) [EPSG:2065]": "EPSG:2065",
+}
+
+crs_var = tk.StringVar(value="UTM Zone 33N (Czechia, Sweden, Slovenia, South-east of Italy) [EPSG:32633]") 
+
 crs_combo = ttk.Combobox(
-    classify_frame,
+    settings_frame,
     textvariable=crs_var,
-    values=crs_options,
-    state="normal" # Umožní vepsat i vlastní kód, např. EPSG:1234
+    values=list(CRS_MAP.keys()),
+    state="readonly"
 )
-crs_combo.grid(row=5, column=1, sticky="ew", padx=5, pady=5)
-scale_combo.grid(row=6, column=1, sticky="ew", padx=5, pady=5)
+crs_combo.grid(row=6, column=1, sticky="ew", padx=5, pady=5)
+scale_combo.grid(row=7, column=1, sticky="ew", padx=5, pady=5)
 controls_frame = ttk.Frame(main_frame, padding="10")
 controls_frame.pack(fill=tk.X, expand=False, pady=(10, 0))
-save_var = tk.BooleanVar(value=True) 
+save_var = tk.BooleanVar(value=True)
+ttk.Label(settings_frame, text="Magnetic declination (°):").grid(row=8, column=0, sticky="w", padx=5, pady=5)
+north_rotation_entry = ttk.Entry(settings_frame)
+north_rotation_entry.insert(0, "5")
+north_rotation_entry.grid(row=8, column=1, sticky="ew", padx=5, pady=5)
+# VÝBĚR VRSTEV
+layers_frame = ttk.Labelframe(middle_container, text="Symbols to draw", padding="10")
+layers_frame.grid(row=0, column=2, sticky="nsew", padx=5)
+LAYER_VISIBILITY = {
+    "contours": tk.BooleanVar(value=True),
+    "private": tk.BooleanVar(value=True),
+    "rocks": tk.BooleanVar(value=True),
+    "vegetation": tk.BooleanVar(value=True),
+    "water": tk.BooleanVar(value=True),
+    "roads": tk.BooleanVar(value=True),
+    "buildings": tk.BooleanVar(value=True),
+    "fences": tk.BooleanVar(value=True),
+    "man_made": tk.BooleanVar(value=True),
+    "magnetic_lines": tk.BooleanVar(value=False)
+}
+ttk.Checkbutton(layers_frame, text="Landforms (101–115)", variable=LAYER_VISIBILITY["contours"]).pack(anchor="w")
+ttk.Checkbutton(layers_frame, text="Rocks and boulders(201–215) ", variable=LAYER_VISIBILITY["rocks"]).pack(anchor="w")
+ttk.Checkbutton(layers_frame, text="Water and marsh(301–313)", variable=LAYER_VISIBILITY["water"]).pack(anchor="w")
+ttk.Checkbutton(layers_frame, text="Vegetation (401–419)", variable=LAYER_VISIBILITY["vegetation"]).pack(anchor="w")
+ttk.Checkbutton(layers_frame, text="Roads, tracks, paths (501–509)", variable=LAYER_VISIBILITY["roads"]).pack(anchor="w")
+ttk.Checkbutton(layers_frame, text="Fences and walls (510–519)", variable=LAYER_VISIBILITY["fences"]).pack(anchor="w")
+ttk.Checkbutton(layers_frame, text="Areas that should not be entered (520)", variable=LAYER_VISIBILITY["private"]).pack(anchor="w")
+ttk.Checkbutton(layers_frame, text="Buildings (521,522)", variable=LAYER_VISIBILITY["buildings"]).pack(anchor="w")
+ttk.Checkbutton(layers_frame, text="Man made features (523–532)", variable=LAYER_VISIBILITY["man_made"]).pack(anchor="w")
+ttk.Checkbutton(layers_frame, text="Magnetic north lines (601)", variable=LAYER_VISIBILITY["magnetic_lines"]).pack(anchor="w")
+
+btn_frame = ttk.Frame(layers_frame)
+btn_frame.pack(fill=tk.X, pady=5)
+def select_all_layers(state):
+    for var in LAYER_VISIBILITY.values():
+        var.set(state)
+
+ttk.Button(btn_frame, text="Check all", command=lambda: select_all_layers(True), width=15).pack(side=tk.LEFT, padx=2)
+ttk.Button(btn_frame, text="Clear all", command=lambda: select_all_layers(False), width=15).pack(side=tk.LEFT, padx=2)
 ttk.Checkbutton(controls_frame, text="Save map to PNG", 
                 variable=save_var).pack(pady=5)
 save_vector_var = tk.BooleanVar(value=True) 

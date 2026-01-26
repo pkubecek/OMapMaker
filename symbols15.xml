@@ -8,12 +8,15 @@
     <symbol id="sym103" type="line">
         <style color="#d15c00" linewidth="0.2835" linestyle="(0, (5.67, 0.567))" />
     </symbol>
+    <symbol id="sym107" type="line">
+        <style color="#d15c00" linewidth="0.709" linestyle="solid" />
+    </symbol>
     <symbol id="sym108" type="line">
         <style color="#d15c00" linewidth="0.71" linestyle="(0, (0.1, 3.0))" solid_capstyle="round" />
     </symbol>
     <symbol id="sym109" type="point">
         <path d="M 3.75 0 A 3.75 3.75 0 0 3.75 -3.75 0 A 3.75 3.75 0 0 3.75 3.75 0 Z" />
-        <style facecolor="none" edgecolor="#d15c00" linewidth="0" />
+        <style facecolor="#d15c00" edgecolor="#d15c00" linewidth="0" />
     </symbol>
     <symbol id="sym111" type="point">
         <path d="M -4.5 0 A 4.5 4.5 0 0 4.5 4.5 0" />
@@ -219,8 +222,8 @@
         <style color="#000000" linewidth="0.3969" linestyle="solid" />
     </symbol>
     <symbol id="sym511P" type="point">
-        <path d="M 2.5 0 A 2.5 2.5 0 0 2.5 -2.5 0 A 2.5 2.5 0 0 2.5 2.5 0 Z" />
-        <style facecolor="none" edgecolor="#000000" linewidth="0.4536"/>
+        <path d="M -3 -3 L 3 -3 L 3 3 L -3 3 Z" />
+        <style facecolor="#000000" edgecolor="none" linewidth="0"/>
     </symbol>
     <symbol id="sym513-1a" type="line">
         <style color="#000000" linewidth="0.3969" linestyle="solid" />
@@ -255,15 +258,10 @@
     <symbol id="sym524b" type="point">
         <path d="M 5 0 A 5 5 0 0 5 -5 0 A 5 5 0 0 5 5 0 Z" />
         <style facecolor="#000000" edgecolor="none" linewidth="0" />
-    </symbol>
-    <symbol id="sym525a" type="point">
-    <path d="M 0 -6.5 L 0 6.5 " />    
+    <symbol id="sym525" type="point">
+    <path d="M -5 -3 L 5 -3 M 0 -3 L 0 6" />    
     <style 
         facecolor="none" edgecolor="#000000" linewidth="0.4536"/>
-    </symbol>
-    <symbol id="sym525b" type="point">
-    <path d="M -6.5 6.5 L 6.5 6.5" />    
-        <style facecolor="#000000" edgecolor="none" linewidth="0" />
     </symbol>
     <symbol id="sym526a" type="point">
         <path d="M 5 0 A 5 5 0 0 5 -5 0 A 5 5 0 0 5 5 0 Z" />
