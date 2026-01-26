@@ -26,6 +26,10 @@ Po stažení stačí nahrát do QGIS a exportovat do SHP tímto skriptem:
     QgsVectorFileWriter.writeAsVectorFormat(vLayer, myDir + vLayer.name() + ".shp", "utf-8", vLayer.crs(), "ESRI Shapefile")
 
 Po spuštění skriptu stačí nahrát všechny SHP a skript si je přebere. 
+
+<img width="9353" height="3591" alt="NACH24DMR_OMap" src="https://github.com/user-attachments/assets/97a1db28-f29c-4e41-838f-ccca1ac6ec75" />
+Ukázky tady: [https://pkubecek.github.io/MapAnt.cz/]([url](https://pkubecek.github.io/MapAnt.cz/))
+
 ### **Errors:**
 #### **Stahování OSM dat**
 1) Pokud se nestahují data z OSM, mělo vby stačit vymazat obsah složky cache,
