@@ -8,7 +8,14 @@
 
 3) Potom stačí spustit skript a vybrat DMR a DMP. Defaultně jsou pak stažena a použita data z OSM.
 
-4) Zatím je možné ladit jen vášku vykreslované vegetace a vybrat měřítko (pokud je vybrán extent, použije se 1 : 10 000 a velikosti symbolů nesedí).
+4) Další nastavení:
+   - Výška vegetace
+   - měřítko (pokud je zvolen extent, použije se 1 : 10 000, které nemusíí odpovídat)
+   - Formát papíru
+   - Souřadnicový  systém
+   - Grivace / magnetická deklinace (odchylka od zvoleného souřadnicového systému
+   - možnost vykreslení jen něktarých skupin symbolů
+   
 
 ### **Data ZABAGED©**
 Pokud chcete pracovat s daty ze ZABAGED©, nejjednodušší je si stáhnout celou databázi [tady]([url](https://geoportal.cuzk.cz/(S(p5s5o0ytsichpi2q2qzdlt30))/Default.aspx?mode=TextMeta&text=dSady_zabaged&side=zabaged&menu=24))
@@ -19,6 +26,10 @@ Po stažení stačí nahrát do QGIS a exportovat do SHP tímto skriptem:
     QgsVectorFileWriter.writeAsVectorFormat(vLayer, myDir + vLayer.name() + ".shp", "utf-8", vLayer.crs(), "ESRI Shapefile")
 
 Po spuštění skriptu stačí nahrát všechny SHP a skript si je přebere. 
+
+<img width="9353" height="3591" alt="NACH24DMR_OMap" src="https://github.com/user-attachments/assets/97a1db28-f29c-4e41-838f-ccca1ac6ec75" />
+Ukázky vytvořené z OSM dat tady: [https://pkubecek.github.io/MapAnt.cz/]([url](https://pkubecek.github.io/MapAnt.cz/))
+
 ### **Errors:**
 #### **Stahování OSM dat**
 1) Pokud se nestahují data z OSM, mělo vby stačit vymazat obsah složky cache,
