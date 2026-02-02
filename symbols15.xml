@@ -8,41 +8,63 @@
     <symbol id="sym103" type="line">
         <style color="#d15c00" linewidth="0.2835" linestyle="(0, (5.67, 0.567))" />
     </symbol>
+    <symbol id="sym104" type="line">
+        <style color="#d15c00" linewidth="0.6" linestyle="solid" capstyle="butt" />
+        <style_ticks length="4" spacing="5" linewidth="0.3969" color="#d15c00" />
+    </symbol>
+    <symbol id="sym105-1a" type="line">
+        <style color="#d15c00" linewidth="0.5103" linestyle="solid" />
+    </symbol>
+    <symbol id="sym105-1b" type="line">
+        <style color="#d15c00" linewidth="1.27575"  linestyle="(0, (0.0067, 5.67))" solid_capstyle="round"/>
+    </symbol>
     <symbol id="sym107" type="line">
         <style color="#d15c00" linewidth="0.709" linestyle="solid" />
     </symbol>
     <symbol id="sym108" type="line">
-        <style color="#d15c00" linewidth="0.71" linestyle="(0, (0.1, 3.0))" solid_capstyle="round" />
+        <style color="#d15c00" linewidth="0.71" linestyle="(0, (0.0067, 3.0))" solid_capstyle="round"/>
     </symbol>
     <symbol id="sym109" type="point">
         <path d="M 3.75 0 A 3.75 3.75 0 0 3.75 -3.75 0 A 3.75 3.75 0 0 3.75 3.75 0 Z" />
         <style facecolor="#d15c00" edgecolor="#d15c00" linewidth="0" />
     </symbol>
     <symbol id="sym111" type="point">
-        <path d="M -4.5 0 A 4.5 4.5 0 0 4.5 4.5 0" />
-        <style facecolor="none" edgecolor="#d15c00" linewidth="0.510"/>
+        <path d="M -4 0 A 4 4 0 0 4 4 0" />
+        <style facecolor="none" edgecolor="#d15c00" linewidth="0.51"/>
+    </symbol>
+    <symbol id="sym112" type="point">
+        <path d="M -3.333 -3.333 L 0 4 L 3.333 -3.333" />
+        <style facecolor="none" edgecolor="#d15c00" linewidth="0.51" />
+    </symbol>
+    <symbol id="sym201" type="line">
+        <style color="#000000" linewidth="0.99225" linestyle="solid" capstyle="butt" />
+        <style_ticks length="4" spacing="5" linewidth="0.3969" color="#000000" />
+    </symbol>
+    <symbol id="sym202" type="line">
+        <style color="#000000" linewidth="0.6" linestyle="solid" capstyle="butt" />
+        <style_ticks length="3.333" spacing="4.333" linewidth="0.3969" color="#000000" />
     </symbol>
     <symbol id="sym203-1" type="point">
-        <path d="M -3.5 3.5 L 0 -3.5 L 3.5 3.5" />
+        <path d="M -3.333 3.333 L 0 -4 L 3.333 3.333" />
         <style facecolor="none" edgecolor="#000000" linewidth="0.4536" solid_capstyle="round" />
     </symbol>
     <symbol id="sym203-2" type="point">
-        <path d="M 5 0 A 5 5 0 0 5 -5 0 A 5 5 0 0 5 5 0 Z" />
+        <path d="M 4.333 0 A 4.333 4.333 0 0 4.333 -4.333 0 A 4.333 4.333 0 0 4.333 4.333 0 Z" />
         <style facecolor="none" edgecolor="#000000" linewidth="0.99225"/>
     </symbol>
     <symbol id="sym204" type="point">
-        <path d="M 3 0 A 3 3 0 0 3 -3 0 A 3 3 0 0 3 3 0 Z" />
+        <path d="M 2 0 A 2 2 0 0 2 -2 0 A 2 2 0 0 2 2 0 Z" />
         <style facecolor="#000000" edgecolor="#000000" linewidth="0" />
     </symbol>
     <symbol id="sym205" type="point">
-        <path d="M 4.5 0 A 4.5 4.5 0 0 4.5 -4.5 0 A 4.5 4.5 0 0 4.5 4.5 0 Z" />
+        <path d="M 3 0 A 3 3 0 0 3 -3 0 A 3 3 0 0 3 3 0 Z" />
         <style facecolor="#000000" edgecolor="#000000" linewidth="0" />
     </symbol>
-    <symbol id="206" type="area">
+    <symbol id="sym206" type="area">
     <style facecolor="#000000" edgecolor="none" linewidth="0" />
     </symbol>
-    <symbol id="207" type="point">
-    <path d="M 0 -6 L 6 6 L -6 6 Z" />
+    <symbol id="sym207" type="point">
+    <path d="M 0 -4 L 3.333 3.333 L -4 4 Z" />
     <style facecolor="#000000" edgecolor="#000000" linewidth="0" />
     </symbol>
     <symbol id="sym209" type="area">
@@ -85,25 +107,25 @@
         <style facecolor="none" edgecolor="#21d1ff" linewidth="0" linestyle="solid" hatchcolor="#21d1ff" hatchdistance="0.567" hatchwidth="0.2835" hatchstyle="solid" />
     </symbol>
     <symbol id="sym309" type="line">
-        <style color="#21d1ff" linewidth="0.71" linestyle="(0, (0.70875, 0.1134))" solid_capstyle="round" />
+        <style color="#21d1ff" linewidth="0.71" linestyle="(0, (0.0067, 1.27575))" solid_capstyle="round" />
     </symbol>
     <symbol id="sym311" type="point">
-        <path d="M -6 0 A -6 -6 0 0 6 6 0" />
+        <path d="M -4 -4 L 4 -4 L 4 4 L -4 4 Z" />
         <style facecolor="none" edgecolor="#21d1ff" linewidth="0.51"/>
     </symbol>
     <symbol id="sym312" type="point">
-        <path d="M -5 0 A -5 -5 0 0 5 5 0" />
+        <path d="M -4.5 0 A 4.5 4.5 0 0 0 4.5 0" />
         <style facecolor="none" edgecolor="#21d1ff" linewidth="0.51"/>
     </symbol>
     <symbol id="sym313" type="point">
-        <path d="M -5 0 A 5 5 0 0 5 5 0" /> 
+        <path d="M -4.5 -4.5 L 0 0 M 4.5 -4.5 L 0 0 M -4.5 3.83 L 0 0 M 4.5 3.83 L 0 0 M 4.5 4.5 L 0 0" />
         <style facecolor="none" edgecolor="#21d1ff" linewidth="0.51"/>
     </symbol>
     <symbol id="sym401" type="area">
         <style facecolor="#ffba35" edgecolor="none" linewidth="0"/>
     </symbol>
     <symbol id="sym402" type="area">
-        <style facecolor="#ffba35" edgecolor="none" linewidth="0" linestyle="solid" dotdistance="1.9845" dotsize="7" dotcolor="#ffffff" />
+        <style facecolor="#ffba35" edgecolor="none" linewidth="0" linestyle="solid" dotdistance="1.9845" dotsize="6.666" dotcolor="#ffffff" />
     </symbol>
         <symbol id="sym403" type="area">
         <style facecolor="#f7f2c2" edgecolor="none" linewidth="0"/>
@@ -115,7 +137,7 @@
         <style color="#0e990e" linewidth="0.8505"/>
     </symbol>
     <symbol id="sym412a" type="area">
-        <style facecolor="#ffba35" dotdistance="2.2682" dotsize="0.5670" dotcolor="#000000" />
+        <style facecolor="#ffba35" linestyle="solid" dotdistance="2.2682" dotsize="0.567" dotcolor="#000000" />
     </symbol>
     <symbol id="sym412b" type="area">
         <style facecolor="none" edgecolor="#000000" linewidth="0.3671" linestyle="solid"/>
@@ -124,7 +146,7 @@
         <style facecolor="#ffba35" edgecolor="none" linewidth="0" linestyle="solid" dotdistance="4" dotsize="1.701" dotcolor="#3dff17" />
     </symbol>
     <symbol id="sym414" type="area">
-        <style facecolor="#ffba35" edgecolor="none" linewidth="0" linestyle="solid" hatchcolor="#3dff17" hatchdistance="2.4100" hatchwidth="0.5671" hatchstyle="(0, (3.6859, 1.7012))" />
+        <style facecolor="#ffba35" edgecolor="none" linewidth="0" linestyle="solid" hatchcolor="#3dff17" hatchdistance="2.41" hatchwidth="0.5671" hatchstyle="(0, (3.6859, 1.7012))" />
     </symbol>
     <symbol id="sym416p" type="area">
         <style facecolor="none" edgecolor="#0e990e" linewidth="0.3969" linestyle="(0, (0.8505, 0.567))" />
@@ -133,24 +155,24 @@
         <style color="#0e990e" linewidth="0.3969" linestyle="(0, (0.8505, 0.567))" />
     </symbol>
     <symbol id="sym417a" type="point">
-        <path d="M 4.25 0 A 4.25 4.25 0 0 4.25 -4.25 0 A 4.25 4.25 0 0 4.25 4.25 0 Z" />
+        <path d="M 3.5 0 A 3.5 3.5 0 0 3.5 -3.5 0 A 3.5 3.5 0 0 3.5 3.5 0 Z" />
         <style facecolor="#ffff" edgecolor="#ffff"/>
     </symbol>
     <symbol id="sym417b" type="point">
-        <path d="M 3.75 0 A 3.75 3.75 0 0 3.75 -3.75 0 A 3.75 3.75 0 0 3.75 3.75 0 Z" />
-        <style facecolor="none" edgecolor="#0e990e" linewidth="0.51"/>
+        <path d="M 3 0 A 3 3 0 0 3 -3 0 A 3 3 0 0 3 3 0 Z" />
+        <style facecolor="none" edgecolor="#0e990e" linewidth="0.34"/>
     </symbol>
     <symbol id="sym418a" type="point">
-        <path d="M 2.5 0 A 2.5 2.5 0 0 2.5 -2.5 0 A 2.5 2.5 0 0 2.5 2.5 0 Z"/>
-        <style facecolor="#0e990e"/>
+        <path d="M 3 0 A 3 3 0 0 3 -3 0 A 3 3 0 0 3 3 0 Z" />
+        <style facecolor="#0e990e" edgecolor="none"/>
     </symbol>
     <symbol id="sym418b" type="point">
-        <path d="M 1.25 0 A 1.25 1.25 0 0 1.25 -1.25 0 A 1.25 1.25 0 0 1.25 1.25 0 Z" />
-        <style facecolor="#ffff"/>
+        <path d="M 2 0 A 2 2 0 0 2 -2 0 A 2 2 0 0 2 2 0 Z" />
+        <style facecolor="#ffff" edgecolor="none"/>
     </symbol>
     <symbol id="sym419" type="point">
-    <path d="M -5.3 -5.3 L 5.3 5.3 M -5.3 5.3 L 5.3 -5.3" />
-    <style facecolor="none" edgecolor="#0e990e" linewidth="0.342"/>
+    <path d="M -3.533 -3.533 L 3.533 3.533 M -3.533 3.533 L 3.533 -3.533" />
+    <style facecolor="none" edgecolor="#0e990e" linewidth="0.34"/>
     </symbol>
     <symbol id="sym501" type="area">
         <style facecolor="#e8ae80" edgecolor="#000000" linewidth="0.2835" />
@@ -165,7 +187,7 @@
         <style color="#000000" linewidth="0.3969" linestyle="solid" />
     </symbol>
     <symbol id="sym502DBa" type="line">
-        <style color="#000000" linewidth="4.8919" linestyle="solid" />
+        <style color="#000000" linewidth="4.2252" linestyle="solid" />
     </symbol>
     <symbol id="sym502DBb" type="line">
         <style color="#ffffff" linewidth="3.8919" linestyle="solid" />
@@ -204,7 +226,7 @@
         <style color="#000000" linewidth="0.5103" linestyle="(0, (2.835, 0.7088, 2.835, 2.268))" />
     </symbol>
     <symbol id="sym508" type="line">
-        <style color="#000000" linewidth="0.5103" linestyle="(0, (5.67, 0.7088))" />
+        <style color="#000000" linewidth="0.5103" linestyle="(0, (8.505, 0.7088))" />
     </symbol>
     <symbol id="sym509a" type="line">
         <style color="#000000" linewidth="1.55925" linestyle="solid" /> 
@@ -222,20 +244,20 @@
         <style color="#000000" linewidth="0.3969" linestyle="solid" />
     </symbol>
     <symbol id="sym511P" type="point">
-        <path d="M -3 -3 L 3 -3 L 3 3 L -3 3 Z" />
+        <path d="M -2 -2 L 2 -2 L 2 2 L -2 2 Z" />
         <style facecolor="#000000" edgecolor="none" linewidth="0"/>
     </symbol>
     <symbol id="sym513-1a" type="line">
         <style color="#000000" linewidth="0.3969" linestyle="solid" />
     </symbol>
     <symbol id="sym513-1b" type="line">
-        <style color="#000000" linewidth="1.134"  linestyle="(0, (1.134, 4.536))" solid_capstyle="round"/>
+        <style color="#000000" linewidth="1.134"  linestyle="(0, (0.0067, 5.67))" solid_capstyle="round"/>
     </symbol>
     <symbol id="sym515a" type="line">
-        <style color="#000000" linewidth="0.70875" linestyle="solid" />
+        <style color="#000000" linewidth="0.7078" linestyle="solid" />
     </symbol>
     <symbol id="sym515b" type="line">
-        <style color="#000000" linewidth="1.701"  linestyle="(0, (1.701, 6.804, 1.701, 0.8505 ))" solid_capstyle="round"/>
+        <style color="#000000" linewidth="1.701"  linestyle="(0, (0.0067, 8.505, 0.0067, 2.28 ))" solid_capstyle="round"/>
     </symbol>
     <symbol id="sym520" type="area">
         <style facecolor="#9eba1d" edgecolor="#000000" linewidth="0.2103" />
@@ -247,36 +269,35 @@
         <style facecolor="#cccccc" edgecolor="#000000" linewidth="0.2835" />
     </symbol>
     <symbol id="sym523" type="point">
-        <path d="M -2.5 -1.2 L -2.5 -2.5 L -1.2 -2.5 M 1.2 -2.5 L 2.5 -2.5 L 2.5 -1.2 M 2.5 1.2 L 2.5 2.5 L 1.2 2.5 M -1.2 2.5 L -2.5 2.5 L -2.5 1.2" />
-        <style facecolor="none" edgecolor="#000000" linewidth="0.3" />
+        <path d="M -4 -0.8 L -4 -2.66 L -0.8 -2.66 M 0.8 -2.66 L 4 -2.66 L 4 -0.8 M 4 0.8 L 4 2.66 L 0.8 2.66 M -0.8 2.66 L -4 2.66 L -4 0.8" />
+        <style facecolor="none" edgecolor="#000000" linewidth="0.333" />
     </symbol>
-<symbol id="sym524a" type="point">
-    <path d="M 0 -7.5 L 0 7.5 M -7.5 0 L 7.5 0" />    
-    <style 
-        facecolor="none" edgecolor="#000000" linewidth="0.4536"/>
+    <symbol id="sym524a" type="point">
+        <path d="M 0 -7 L 0 7 M -7 0 L 7 0" />    
+        <style facecolor="none" edgecolor="#000000" linewidth="0.3024"/>
     </symbol>
     <symbol id="sym524b" type="point">
-        <path d="M 5 0 A 5 5 0 0 5 -5 0 A 5 5 0 0 5 5 0 Z" />
+        <path d="M 4 0 A 4 4 0 0 4 -4 0 A 4 4 0 0 4 4 0 Z" />
         <style facecolor="#000000" edgecolor="none" linewidth="0" />
+    </symbol>
     <symbol id="sym525" type="point">
-    <path d="M -5 -3 L 5 -3 M 0 -3 L 0 6" />    
-    <style 
-        facecolor="none" edgecolor="#000000" linewidth="0.4536"/>
+        <path d="M -5 -5 L 5 -5 M 0 -5 L 0 5" />    
+        <style facecolor="none" edgecolor="#000000" linewidth="0.4536"/>
     </symbol>
     <symbol id="sym526a" type="point">
-        <path d="M 5 0 A 5 5 0 0 5 -5 0 A 5 5 0 0 5 5 0 Z" />
+        <path d="M 4 0 A 4 4 0 0 4 -4 0 A 4 4 0 0 4 4 0 Z" />
         <style facecolor="none" edgecolor="#000000" linewidth="0.4536"/>
     </symbol>
     <symbol id="sym526b" type="point">
-        <path d="M 1 0 A 1 1 0 0 1 -1 0 A 1 1 0 0 1 1 0 Z" />
+        <path d="M 0.666 0 A 0.666 0.666 0 0 1 -0.666 0 A 0.666 0.666 0 0 1 0.666 0 Z" />
         <style facecolor="#000000" edgecolor="none" linewidth="0"/>
     </symbol>
     <symbol id="sym530" type="point">
-        <path d="M 4.3 0 A 4.3 4.3 0 0 4.3 -4.3 0 A 4.3 4.3 0 0 4.3 4.3 0 Z" />
-        <style facecolor="none" edgecolor="#000000" linewidth="0.2536"/>
+        <path d="M 4 0 A 4 4 0 0 4 -4 0 A 4 4 0 0 4 4 0 Z" />
+        <style facecolor="none" edgecolor="#000000" linewidth="0.2357"/>
     </symbol>
     <symbol id="sym531" type="point">
-    <path d="M -4.3 -4.3 L 4.3 4.3 M -4.3 4.3 L 4.3 -4.3" />
+    <path d="M -4 -4 L 4 4 M -4 4 L 4 -4" />
     <style facecolor="none" edgecolor="#000000" linewidth="0.51"/>
     </symbol>
     <symbol id="sym532a" type="line">
@@ -286,9 +307,9 @@
         <style color="#e8ae80" linewidth="0.70875" linestyle="solid" />
     </symbol>
     <symbol id="sym532c" type="line">
-        <style color="#000000" linewidth="1.10" linestyle="(0, (0.1835, 0.554))"/>
+        <style color="#000000" linewidth="1.1" linestyle="(0, (0.15, 0.234))"/>
     </symbol>
     <symbol id="sym601" type="line">
-        <style color="#21d1ff" linewidth="0.3402" linestyle="solid"/>
+        <style color="#21d1ff" linewidth="0.3402" linestyle="solid" />
     </symbol>
 </root>
