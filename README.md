@@ -2,7 +2,7 @@
 
 ## Spuštění skriptu
 
-1) Stáhněte si OMapMaker.py a xml soubory (symbols15.xml, symbols10.xml)
+1) Stáhněte nejnovější release a soubory symbols15.xml a symbols10.xml. XML soubory vložte do stejné složky jako EXE soubor.
 
 2) Stáhněte si DMR a DMP zvoleného území
 
