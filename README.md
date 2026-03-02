@@ -14,6 +14,7 @@
    - Formát papíru
    - Souřadnicový  systém
    - Grivace / magnetická deklinace (odchylka od zvoleného souřadnicového systému
+   - Výška kupek, houbka prohlubní, zhlazení vrstevnic
    - možnost vykreslení jen něktarých skupin symbolů
    
 
