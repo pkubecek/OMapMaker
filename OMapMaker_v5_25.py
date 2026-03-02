@@ -31,17 +31,17 @@ import os
 import re
 
 CURRENT_CRS = "EPSG:5514"
-def load_symbol_library(xml_file_path):
+def load_symbol_library(xml_file):
     """ Načte symboly a inteligentně opraví formáty (čárky v číslech vs. n-tice v závorkách) """
-    print(f"--- Načítám symboly z: {xml_file_path} ---")
+    print(f"--- Načítám symboly z: {xml_file} ---")
     library = {}
     
-    if not os.path.exists(xml_file_path):
+    if not os.path.exists(xml_file):
         print("❌ CHYBA: Soubor symbols.xml nenalezen.")
         return {}
 
     try:
-        tree = ET.parse(xml_file_path)
+        tree = ET.parse(xml_file)
         root = tree.getroot()
         
         for symbol in root.findall('symbol'):
@@ -61,8 +61,7 @@ def load_symbol_library(xml_file_path):
             for k, v in props.items():
                 val_str = str(v).strip()
                 
-                # A) Je to n-tice/tuple? (např. linestyle="(0, (1, 5))")
-                # Tu musíme zachovat a NEKONVERTOVAT čárky, jinak to matplotlib nevezme
+                # n-tice/tuple? (např. linestyle="(0, (1, 5))") musíme zachovat a NEKONVERTOVAT čárky, jinak to matplotlib nevezme
                 if val_str.startswith('('):
                     try:
                         clean_props[k] = literal_eval(val_str)
@@ -70,7 +69,7 @@ def load_symbol_library(xml_file_path):
                     except:
                         pass # Nejde to, zkusíme další metody
                 
-                # B) Je to číslo s čárkou? (např. "0,35")
+                # číslo s čárkou? (např. "0,35")
                 val_fixed = val_str.replace(',', '.')
                 try:
                     clean_props[k] = float(val_fixed)
@@ -78,7 +77,7 @@ def load_symbol_library(xml_file_path):
                 except ValueError:
                     pass
                 
-                # C) Je to text (barva, string)
+                # text (barva, string)
                 clean_props[k] = val_str
 
             # 2. Načtení cesty (Path) pro bodové značky
@@ -113,7 +112,7 @@ def load_symbol_library(xml_file_path):
         print(f"❌ KRITICKÁ CHYBA XML: {e}")
         return {}
     
-def load_dmr_grid(dmr_path, target_crs_code, pixel_size=0.5):
+def load_dmr_grid(dmr_path, target_crs_code, pixel_size=0.5, sigma_smooth=6.5):
     """ 
     Načte DMR, rozšíří rastr o 10 px a okraje vyplní hodnotou nejbližšího bodu (extrapolace).
     """
@@ -217,7 +216,7 @@ def load_dmr_grid(dmr_path, target_crs_code, pixel_size=0.5):
     
     # --- 5. VYHLAZENÍ ---
     # Lehké vyhlazení, aby přechod mezi Cubic a Nearest nebyl ostrý
-    sigma_pixels = 5 # Nebo méně, pokud chceš ostřejší terén
+    sigma_pixels = sigma_smooth # Nebo méně, pokud chceš ostřejší terén
     dmr_grid = gaussian_filter(dmr_grid, sigma=sigma_pixels)
             
     return dmr_grid, grid_x, grid_y, extent, points, z
@@ -438,7 +437,7 @@ def add_contour_lines(ax, grid_x, grid_y, dmr_grid_unclipped, smoothing_s=2, cli
     # Detekce mírných sklonů (gentle slope)
     slope = np.hypot(gx, gy)
     
-    curvature_threshold = np.percentile(curvature[safe_mask], 96)
+    curvature_threshold = np.percentile(curvature[safe_mask], 88)
     curvature_mask = (curvature > curvature_threshold) & safe_mask
     gentle_slope_mask = (slope < np.percentile(slope[safe_mask], 15)) & safe_mask
     combined_mask = curvature_mask | gentle_slope_mask
@@ -453,7 +452,7 @@ def add_contour_lines(ax, grid_x, grid_y, dmr_grid_unclipped, smoothing_s=2, cli
     
     print("✅ Vrstevnice vykresleny")
 
-def vectorize_rocks(grid_x, grid_y, dmr_grid, transform, slope_threshold_deg=28):
+def vectorize_rocks(grid_x, grid_y, dmr_grid, transform, slope_threshold_deg=26):
     print("Vektorizuji skály...")
     status_label.config(text="Vektorizuji skály...")
     root.update_idletasks()
@@ -471,7 +470,7 @@ def vectorize_rocks(grid_x, grid_y, dmr_grid, transform, slope_threshold_deg=28)
     rock_area = np.flipud(rock_area)
 
     pixel_area = abs(transform.a * transform.e)
-    min_area = 10 * pixel_area
+    min_area = 5 * pixel_area
     
     if not np.any(rock_area):
         return gpd.GeoDataFrame(columns=['class_name', 'geometry'], crs=CURRENT_CRS)
@@ -490,7 +489,7 @@ def vectorize_rocks(grid_x, grid_y, dmr_grid, transform, slope_threshold_deg=28)
         print("✅ Skály vykresleny")
 
         # Čištění geometrií
-        gdf.geometry = gdf.geometry.buffer(0.2).buffer(-0.1).simplify(0.5)
+        gdf.geometry = gdf.geometry.buffer(1.0).buffer(-0.1).simplify(0.5)
         dissolved_gdf = gdf.dissolve(by='class_name').reset_index()
 
         return dissolved_gdf
@@ -499,7 +498,7 @@ def vectorize_rocks(grid_x, grid_y, dmr_grid, transform, slope_threshold_deg=28)
         print(f"Chyba skal: {e}")
         return gpd.GeoDataFrame(columns=['class_name', 'geometry'], crs=CURRENT_CRS)
 
-def add_depressions(ax, grid_x, grid_y, dmr_grid, pixel_size=0.5, min_diameter=0.5, max_diameter=3, min_depth=0.3):
+def add_depressions(ax, grid_x, grid_y, dmr_grid, pixel_size=0.5, min_diameter=2, max_diameter=5, min_depth=0.7):
     print(f"Detekuji prohlubně (pixel: {pixel_size}m, min_hloubka: {min_depth}m)...")
     status_label.config(text="Detekuji prohlubně...")
     root.update_idletasks()
@@ -537,15 +536,15 @@ def add_depressions(ax, grid_x, grid_y, dmr_grid, pixel_size=0.5, min_diameter=0
         symbol_props.pop(k, None)
 
     # --- 1. DYNAMICKÉ FILTRY (V metrech, ne pixelech) ---
-    # Sigma pro vyhlazení terénu (aby zmizel šum) - cca 0.5 metru
+    # Sigma pro vyhlazení terénu
     sigma_smooth_meters = 0.5
     sigma_smooth = sigma_smooth_meters / pixel_size
     
     # Sigma pro referenční rovinu (musí "překlenout" díru) - cca 5 metrů
-    sigma_ref = 5
+    sigma_ref = 8
     
     # Okno pro hledání minima (aby to nebyl jen dolík mezi kameny) - cca 2 metry
-    window_size_meters = 5.0
+    window_size_meters = 30.0
     window_size = int(window_size_meters / pixel_size)
     if window_size < 3: window_size = 3 # Minimum 3x3
 
@@ -609,7 +608,7 @@ def add_depressions(ax, grid_x, grid_y, dmr_grid, pixel_size=0.5, min_diameter=0
     print("✅ Prohlubně vykresleny")
 
 
-def add_knoll_symbols(ax, grid_x, grid_y, dmr_grid, pixel_size=0.5, min_height=0.25, max_diameter=3.0):
+def add_knoll_symbols(ax, grid_x, grid_y, dmr_grid, pixel_size=0.5, min_height=0.8, max_diameter=6.0):
     print("Kreslím kupky...")
     status_label.config(text="Kreslím kupky...")
     root.update_idletasks()
@@ -625,11 +624,11 @@ def add_knoll_symbols(ax, grid_x, grid_y, dmr_grid, pixel_size=0.5, min_height=0
     safe_mask = binary_erosion(valid_data_mask, iterations=8)
     # 2. ANALÝZA TERÉNU
     # Vyhlazení pro odstranění drobného šumu
-    smoothed = gaussian_filter(dmr_grid, sigma=0.1)
+    smoothed = gaussian_filter(dmr_grid, sigma=0.5)
     
     # Hledání lokálních maxim v okně 5x5 pixelů
-    local_max = (smoothed == maximum_filter(smoothed, size=5))
-    height_reference = gaussian_filter(smoothed, sigma=2)
+    local_max = (smoothed == maximum_filter(smoothed, size=20))
+    height_reference = gaussian_filter(smoothed, sigma=8)
     height = smoothed - height_reference
     
     # Kupka musí být lokální maximum, mít minimální výšku a ležet v bezpečné zóně
@@ -1308,155 +1307,184 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs, dmr_grid_linear_viz_feature
     else:
         pass
 
-    # 201 - Skalní sráz
-    sym = "sym201"
-    cgdf = isom_gdfs.get("201")
+    # 109 - Malá erozní rýha
+    sym = "sym109"
+    cgdf = isom_gdfs.get("109")
     if cgdf is not None:
-        plot_masked(sym_key="sym202", zorder=21, mask=None, gdf=cgdf, ax=ax, to_mask=False)
-    else:
-        mask_cliff_high = (natural == "cliff")
-        plot_masked(sym_key=sym, zorder=21, mask=mask_cliff_high, gdf=gdf_lines, ax=ax, dmr_grid=dmr_grid_linear_viz_features, grid_x=grid_x, grid_y=grid_y)  
-    # 202 - Skalní sráz
-    sym = "sym202"
-    cgdf = isom_gdfs.get("202")
-    if cgdf is not None:
-        plot_masked(sym_key=sym, zorder=21, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        plot_masked(sym_key="sym", zorder=21, mask=None, gdf=cgdf, ax=ax, to_mask=False)
     else:
         pass
 
-    # 203-1 - Jeskyně
-    sym = "sym203-1"
-    cgdf = isom_gdfs.get("203.1")
+    # 111 - Malá erozní rýha
+    sym = "sym111"
+    cgdf = isom_gdfs.get("111")
     if cgdf is not None:
-        plot_masked(sym_key=sym, zorder=56, mask=None, gdf=cgdf, ax=ax, to_mask=False)
-    if "VstupDoJeskyne" in zabaged_gdfs:
-        plot_masked(sym_key=sym, zorder=56, mask=None, gdf=zabaged_gdfs["VstupDoJeskyne"], ax=ax, to_mask=False)
+        plot_masked(sym_key="sym", zorder=21, mask=None, gdf=cgdf, ax=ax, to_mask=False)
     else:
-        mask_cave = (natural == "cave_entrance") | (man_made == "adit")
-        plot_masked(sym_key=sym, zorder=56, mask=mask_cave, gdf=gdf_centroids, ax=ax)
+        pass
+
+    # 112 - Malá erozní rýha
+    sym = "sym112"
+    cgdf = isom_gdfs.get("112")
+    if cgdf is not None:
+        plot_masked(sym_key="sym", zorder=21, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+    else:
+        pass
     
-    # 203-2 - Nebezpečná jáma
-    sym = "sym203-2"
-    cgdf = isom_gdfs.get("203.1")
-    if cgdf is not None:
-        plot_masked(sym_key=sym, zorder=56, mask=None, gdf=cgdf, ax=ax, to_mask=False)
-    else:
-        pass
-
-    # 204 - Malý Balvan
-    sym = "sym204"
-    cgdf = isom_gdfs.get("204")
-    if cgdf is not None:
-        plot_masked(sym_key=sym, zorder=56, mask=None, gdf=cgdf, ax=ax, to_mask=False)
-    else:
-        pass
-
-    # 205 - Balvan
-    sym = "sym205"
-    cgdf = isom_gdfs.get("205")
-    if cgdf is not None:
-        plot_masked(sym_key=sym, zorder=56, mask=None, gdf=cgdf, ax=ax, to_mask=False)
-    elif "OsamelyBalvanSkalaSkalniSuk" in zabaged_gdfs:
-        plot_masked(sym_key=sym, zorder=56, mask=None, gdf=zabaged_gdfs["OsamelyBalvanSkalaSkalniSuk"], ax=ax, to_mask=False)
-    else:
-        mask_boulder = (natural.isin(["stone", "rock"])) | (geological == "glacial_erratic")
-        plot_masked(sym_key=sym, zorder=56, mask=mask_boulder, gdf=gdf_centroids, ax=ax)
+    if visibility.get("rocks", True):
+        '''
+        # 201 - Skalní sráz
+        sym = "sym201"
+        cgdf = isom_gdfs.get("201")
+        if cgdf is not None:
+            plot_masked(sym_key="sym202", zorder=56, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        else:
+            mask_cliff_high = (natural == "cliff")
+            plot_masked(sym_key=sym, zorder=56, mask=mask_cliff_high, gdf=gdf_lines, ax=ax, dmr_grid=dmr_grid_linear_viz_features, grid_x=grid_x, grid_y=grid_y)  
+        '''
+        # 202 - Skalní sráz
+        sym = "sym202"
+        cgdf = isom_gdfs.get("202")
+        if cgdf is not None:
+            plot_masked(sym_key=sym, zorder=56, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        else:
+            pass
         
-    # 206 - Skalní útvar 
-    sym = "sym206"
-    cgdf = isom_gdfs.get("206")
-    if cgdf is not None:
-        plot_masked(sym_key=sym, zorder=56, mask=None, gdf=cgdf, ax=ax, to_mask=False)
-    elif "SkalniUtvary" in zabaged_gdfs:
-        plot_masked(sym_key=sym, zorder=56, mask=None, gdf=zabaged_gdfs["SkalniUtvary"], ax=ax, to_mask=False)
-    else:
-        mask_rock = (geological.isin(["tor", "hoodoo", "dyke"]))
-        plot_masked(sym_key=sym, zorder=56, mask=mask_rock, gdf=gdf_centroids, ax=ax)
+        # 203-1 - Jeskyně
+        sym = "sym203-1"
+        cgdf = isom_gdfs.get("203.1")
+        if cgdf is not None:
+            plot_masked(sym_key=sym, zorder=56, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        if "VstupDoJeskyne" in zabaged_gdfs:
+            plot_masked(sym_key=sym, zorder=56, mask=None, gdf=zabaged_gdfs["VstupDoJeskyne"], ax=ax, to_mask=False)
+        else:
+            mask_cave = (natural == "cave_entrance") | (man_made == "adit")
+            plot_masked(sym_key=sym, zorder=56, mask=mask_cave, gdf=gdf_centroids, ax=ax)
         
-    # 207 - Skupina balvanů
-    sym = "sym207"
-    cgdf = isom_gdfs.get("207")
-    if cgdf is not None:
-        plot_masked(sym_key=sym, zorder=56, mask=None, gdf=cgdf, ax=ax, to_mask=False)
-    elif "SkupinaBalvanu_b" in zabaged_gdfs:
-        plot_masked(sym_key=sym, zorder=56, mask=None, gdf=zabaged_gdfs["SkupinaBalvanu_b"], ax=ax, to_mask=False)
-    
-    # 208 - Kamenité pole (Blockfield)
-    sym = "sym208"
-    cgdf = isom_gdfs.get("208")
-    if cgdf is not None:
-        plot_masked(sym_key="sym209", zorder=18, mask=None, gdf=cgdf, ax=ax, to_mask=False)
-    else:
-        pass
+        # 203-2 - Nebezpečná jáma
+        sym = "sym203-2"
+        cgdf = isom_gdfs.get("203.1")
+        if cgdf is not None:
+            plot_masked(sym_key=sym, zorder=56, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        else:
+            pass
 
-    # 209 - Kamenité pole (Blockfield)
-    sym = "sym209"
-    cgdf = isom_gdfs.get("209")
-    if cgdf is not None:
-        plot_masked(sym_key=sym, zorder=18, mask=None, gdf=cgdf, ax=ax, to_mask=False)
-    else:
-        mask_gravel1 = (natural == "blockfield")
-        plot_masked(sym_key=sym, zorder=18, mask=mask_gravel1, gdf=gdf_polygons, ax=ax)
-    
-    # 210 - Suťoviště (Scree)
-    sym = "sym210"
-    cgdf = isom_gdfs.get("210")
-    if cgdf is not None:
-        plot_masked(sym_key=sym, zorder=18, mask=None, gdf=cgdf, ax=ax, to_mask=False)
-    else:
-        mask_gravel2 = (natural == "scree")
-        plot_masked(sym_key=sym, zorder=18, mask=mask_gravel2, gdf=gdf_polygons, ax=ax)
-    
-    # 211 - Suťoviště (Scree)
-    sym = "sym211"
-    cgdf = isom_gdfs.get("211")
-    if cgdf is not None:
-        plot_masked(sym_key="sym210", zorder=18, mask=None, gdf=cgdf, ax=ax, to_mask=False)
-    else:
-        pass
+        # 204 - Malý Balvan
+        sym = "sym204"
+        cgdf = isom_gdfs.get("204")
+        if cgdf is not None:
+            plot_masked(sym_key=sym, zorder=56, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        else:
+            pass
 
-    # 212 - Suťoviště (Scree)
-    sym = "sym212"
-    cgdf = isom_gdfs.get("212")
-    if cgdf is not None:
-        plot_masked(sym_key="sym210", zorder=18, mask=None, gdf=cgdf, ax=ax, to_mask=False)
-    else:
-        pass
+        # 205 - Balvan
+        sym = "sym205"
+        cgdf = isom_gdfs.get("205")
+        if cgdf is not None:
+            plot_masked(sym_key=sym, zorder=56, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        elif "OsamelyBalvanSkalaSkalniSuk" in zabaged_gdfs:
+            plot_masked(sym_key=sym, zorder=56, mask=None, gdf=zabaged_gdfs["OsamelyBalvanSkalaSkalniSuk"], ax=ax, to_mask=False)
+        else:
+            mask_boulder = (natural.isin(["stone", "rock"])) | (geological == "glacial_erratic")
+            plot_masked(sym_key=sym, zorder=56, mask=mask_boulder, gdf=gdf_centroids, ax=ax)
+            
+        # 206 - Skalní útvar 
+        '''
+        sym = "sym206"
+        cgdf = isom_gdfs.get("206")
+        if cgdf is not None:
+            plot_masked(sym_key=sym, zorder=56, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        elif "SkalniUtvary" in zabaged_gdfs:
+            plot_masked(sym_key=sym, zorder=56, mask=None, gdf=zabaged_gdfs["SkalniUtvary"], ax=ax, to_mask=False)
+        else:
+            mask_rock = (geological.isin(["tor", "hoodoo", "dyke"]))
+            plot_masked(sym_key=sym, zorder=56, mask=mask_rock, gdf=gdf_centroids, ax=ax)
+        '''
+                
+        # 207 - Skupina balvanů
+        sym = "sym207"
+        cgdf = isom_gdfs.get("207")
+        if cgdf is not None:
+            plot_masked(sym_key=sym, zorder=56, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        elif "SkupinaBalvanu_b" in zabaged_gdfs:
+            plot_masked(sym_key=sym, zorder=56, mask=None, gdf=zabaged_gdfs["SkupinaBalvanu_b"], ax=ax, to_mask=False)
+        
+        # 208 - Kamenité pole (Blockfield)
+        sym = "sym208"
+        cgdf = isom_gdfs.get("208")
+        if cgdf is not None:
+            plot_masked(sym_key="sym208", zorder=18, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        else:
+            pass
 
-    # 213 - Písek
-    sym = "sym213"
-    cgdf = isom_gdfs.get("213")
-    if cgdf is not None:
-        plot_masked(sym_key=sym, zorder=15, mask=None, gdf=cgdf, ax=ax, to_mask=False)
-    else:
-        mask_sand = (natural.isin(["sand", "dune"]))
-        plot_masked(sym_key=sym, zorder=15, mask=mask_sand, gdf=gdf_polygons, ax=ax)
-    
-    # 214 - Skalní podloží
-    sym = "sym214"
-    cgdf = isom_gdfs.get("214")
-    if cgdf is not None:
-        plot_masked(sym_key=sym, zorder=17, mask=None, gdf=cgdf, ax=ax, to_mask=False)
-    else:
-        mask_bedrock = (natural == "bare_rock")
-        plot_masked(sym_key=sym, zorder=17, mask=mask_bedrock, gdf=gdf_polygons, ax=ax)
-    
-    # 215 - Příkop (zákop) - SLOŽENÝ SYMBOL (Kontrola 2x, pro okraj a pro výplň)
-    mask_ditch = (barrier == "ditch") | (military == "trench")
-    
-    sym = "sym215a"
-    cgdf = isom_gdfs.get("215")
-    if cgdf is not None:
-        plot_masked(sym_key=sym, zorder=21, mask=None, gdf=cgdf, ax=ax, to_mask=False)
-    else:
-        plot_masked(sym_key=sym, zorder=21, mask=mask_ditch, gdf=gdf_lines, ax=ax)
+        # 209 - Kamenité pole (Blockfield)
+        sym = "sym209"
+        cgdf = isom_gdfs.get("209")
+        if cgdf is not None:
+            plot_masked(sym_key=sym, zorder=18, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        else:
+            mask_gravel1 = (natural == "blockfield")
+            plot_masked(sym_key=sym, zorder=18, mask=mask_gravel1, gdf=gdf_polygons, ax=ax)
+        
+        # 210 - Suťoviště (Scree)
+        sym = "sym210"
+        cgdf = isom_gdfs.get("210")
+        if cgdf is not None:
+            plot_masked(sym_key=sym, zorder=18, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        else:
+            mask_gravel2 = (natural == "scree")
+            plot_masked(sym_key=sym, zorder=18, mask=mask_gravel2, gdf=gdf_polygons, ax=ax)
+        
+        # 211 - Suťoviště (Scree)
+        sym = "sym211"
+        cgdf = isom_gdfs.get("211")
+        if cgdf is not None:
+            plot_masked(sym_key="sym210", zorder=18, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        else:
+            pass
 
-    sym = "sym215b"
-    cgdf = isom_gdfs.get("215")
-    if cgdf is not None:
-        plot_masked(sym_key=sym, zorder=21, mask=None, gdf=cgdf, ax=ax, to_mask=False)
-    else:
-        plot_masked(sym_key=sym, zorder=21, mask=mask_ditch, gdf=gdf_lines, ax=ax)
+        # 212 - Suťoviště (Scree)
+        sym = "sym212"
+        cgdf = isom_gdfs.get("212")
+        if cgdf is not None:
+            plot_masked(sym_key="sym210", zorder=18, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        else:
+            pass
+
+        # 213 - Písek
+        sym = "sym213"
+        cgdf = isom_gdfs.get("213")
+        if cgdf is not None:
+            plot_masked(sym_key=sym, zorder=15, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        else:
+            mask_sand = (natural.isin(["sand", "dune"]))
+            plot_masked(sym_key=sym, zorder=15, mask=mask_sand, gdf=gdf_polygons, ax=ax)
+        
+        # 214 - Skalní podloží
+        sym = "sym214"
+        cgdf = isom_gdfs.get("214")
+        if cgdf is not None:
+            plot_masked(sym_key=sym, zorder=17, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        else:
+            mask_bedrock = (natural == "bare_rock")
+            plot_masked(sym_key=sym, zorder=17, mask=mask_bedrock, gdf=gdf_polygons, ax=ax)
+        
+        # 215 - Příkop (zákop) - SLOŽENÝ SYMBOL (Kontrola 2x, pro okraj a pro výplň)
+        mask_ditch = (barrier == "ditch") | (military == "trench")
+        
+        sym = "sym215a"
+        cgdf = isom_gdfs.get("215")
+        if cgdf is not None:
+            plot_masked(sym_key=sym, zorder=21, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        else:
+            plot_masked(sym_key=sym, zorder=21, mask=mask_ditch, gdf=gdf_lines, ax=ax)
+
+        sym = "sym215b"
+        cgdf = isom_gdfs.get("215")
+        if cgdf is not None:
+            plot_masked(sym_key=sym, zorder=21, mask=None, gdf=cgdf, ax=ax, to_mask=False)
+        else:
+            plot_masked(sym_key=sym, zorder=21, mask=mask_ditch, gdf=gdf_lines, ax=ax)
 
     # ======================================================================
     # WATER (Voda)
@@ -1473,12 +1501,12 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs, dmr_grid_linear_viz_feature
             if "VodniPlocha" in zabaged_gdfs:
                 plot_masked(sym_key=sym, zorder=27, mask=None, gdf=zabaged_gdfs["VodniPlocha"], ax=ax, to_mask=False)
             if "PozemniNadrz" in zabaged_gdfs:
-                plot_masked(sym_key=sym, zorder=26, mask=None, gdf=zabaged_gdfs["PozemniNadrz"], ax=ax, to_mask=False)
+                plot_masked(sym_key=sym, zorder=27, mask=None, gdf=zabaged_gdfs["PozemniNadrz"], ax=ax, to_mask=False)
         else:
             mask_water_deep = (natural.isin(["lake", "water", "canal"])) | (water.isin(["lake", "river", "basin", "bay", "reservoir"])) | (landuse == "basin") | (leisure == "swimming_pool")
             plot_masked(sym_key=sym, zorder=27, mask=mask_water_deep, gdf=gdf_polygons, ax=ax)
         
-        # 302 - Mělčina
+        # 302 -  Mělké vodní těleso
         sym = "sym302"
         cgdf = isom_gdfs.get("302")
         if cgdf is not None:
@@ -2107,7 +2135,7 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs, dmr_grid_linear_viz_feature
             mask_cable_high = (power.isin(["line", "minor_line"]))
             plot_masked(sym_key=sym, zorder=70, mask=mask_cable_high, gdf=gdf_lines, ax=ax)
 
-        # 513 - Zeď (Složený symbol a+b)
+        # 513.1 - Zeď (Složený symbol a+b)
         sym = "sym513-1a"
         zabaged_has = any(k in zabaged_gdfs for k in ["Zed", "PrehradniHrazJez", "Hrad"])
         cgdf = isom_gdfs.get("513.1")
@@ -2141,7 +2169,7 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs, dmr_grid_linear_viz_feature
             mask_wall_low = (barrier == "wall")
             plot_masked(sym_key=sym, zorder=30, mask=mask_wall_low, gdf=gdf_lines, ax=ax)
 
-        # 515 - Vysoká zeď (Složený symbol a+b)
+        # 515 - Nepřekonatelná zeď (Složený symbol a+b)
         sym = "sym515a"
         cgdf = isom_gdfs.get(515)
         if cgdf is not None:
@@ -2296,7 +2324,7 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs, dmr_grid_linear_viz_feature
             mask_building = (building.notna()) & (building != '') & (~building.isin(["roof", "ruins"]))
             plot_masked(sym_key=sym, zorder=50, mask=mask_building, gdf=gdf_polygons, ax=ax)
             
-        # 522 - Přístřešek
+        # 522 - Zastřešení
         sym = "sym522"
         cgdf = isom_gdfs.get("522")
         if cgdf is not None:
@@ -2481,7 +2509,11 @@ def run_main_analysis():
             b1, b2, b3, b4 = 0.5, 2.0, 5.0, 11.0
             bins = [-1, 0, b1, b2, b3, b4]
 
-        dmr_grid_cubic, grid_x, grid_y, extent, dmr_points, dmr_z = load_dmr_grid(dmr_path, target_crs_code=CURRENT_CRS, pixel_size=FIXED_PIXEL_SIZE)
+        try:
+            dmr_smooth = float(contour_smooth.get().replace(",", "."))
+        except ValueError: dmr_smooth = 6.5
+        
+        dmr_grid_cubic, grid_x, grid_y, extent, dmr_points, dmr_z = load_dmr_grid(dmr_path, target_crs_code=CURRENT_CRS, pixel_size=FIXED_PIXEL_SIZE, sigma_smooth=dmr_smooth)
         (minx, maxx, miny, maxy) = extent
         status_label.config(text="Vytvářím ořezovou masku...")
         root.update_idletasks()
@@ -2800,8 +2832,13 @@ def run_main_analysis():
         dmr_grid_cubic_viz = dmr_grid_cubic_viz_mask_input
         dmr_grid_linear_viz = dmr_grid_linear_viz_mask_input
         
+        try:
+            rock_slope_deg = float(slope_threshold_entry.get().replace(",", "."))
+        except ValueError:
+            rock_slope_deg = 27.0
+        
         gdf_rocks = vectorize_rocks(
-            grid_x, grid_y, dmr_grid_linear_viz, transform 
+            grid_x, grid_y, dmr_grid_linear_viz, transform, slope_threshold_deg=rock_slope_deg
         )
         progress_bar["value"] = 70
         
@@ -2814,7 +2851,7 @@ def run_main_analysis():
             root.after(2000, lambda: status_label.config(text="Done.", foreground="darkgreen"))
             return 
 
-        # --- GENEROWÁNÍ MAPY ---
+        # --- GENEROvÁNÍ MAPY ---
         status_label.config(text="Generuji kompozici mapy...")
         root.update_idletasks()
         
@@ -2884,16 +2921,22 @@ def run_main_analysis():
             root.update_idletasks()
             # Předáváme fixní pixel size
             add_contour_lines(ax, grid_x, grid_y, dmr_grid_cubic_viz) 
-            '''
+            
             # 5. Kreslení PRVKŮ (Kupky, prohlubně)
+            try: knoll_h = float(knoll_height_entry.get().replace(",", "."))
+            except ValueError: knoll_h = 0.8
+            
+            try: dep_depth = float(dep_depth_entry.get().replace(",", "."))
+            except ValueError: dep_depth = 0.3
+            
             status_label.config(text="Kreslím terénní detaily...")
             root.update_idletasks()
             add_depressions(ax, grid_x, grid_y, dmr_grid_linear_viz_features, 
                             pixel_size=FIXED_PIXEL_SIZE, 
-                            min_diameter=0.5, max_diameter=3, min_depth=0.2)
-            '''               
+                            min_diameter=0.5, max_diameter=3, min_depth=dep_depth)
+                          
             add_knoll_symbols(ax, grid_x, grid_y, dmr_grid_linear_viz_features, 
-                            pixel_size=FIXED_PIXEL_SIZE)
+                            pixel_size=FIXED_PIXEL_SIZE, min_height=knoll_h)
         
         # 6. Kreslení VEKTORŮ (OSM/Zabaged)
         status_label.config(text="Kreslím cesty a objekty...")
@@ -3117,6 +3160,27 @@ ttk.Label(settings_frame, text="Magnetic declination (°):").grid(row=8, column=
 north_rotation_entry = ttk.Entry(settings_frame)
 north_rotation_entry.insert(0, "5")
 north_rotation_entry.grid(row=8, column=1, sticky="ew", padx=5, pady=5)
+ttk.Label(settings_frame, text="Other settings:").grid(row=9, column=0, sticky="w", padx=5, pady=5)
+ttk.Label(settings_frame, text="Rock slope threshold (°):").grid(row=10, column=0, sticky="w", padx=5, pady=5)
+slope_threshold_entry = ttk.Entry(settings_frame)
+slope_threshold_entry.insert(0, "27")
+slope_threshold_entry.grid(row=10, column=1, sticky="ew", padx=5, pady=5)
+
+ttk.Label(settings_frame, text="Minimal knoll height (m):").grid(row=11, column=0, sticky="w", padx=5, pady=5)
+knoll_height_entry = ttk.Entry(settings_frame)
+knoll_height_entry.insert(0, "0.8")
+knoll_height_entry.grid(row=11, column=1, sticky="ew", padx=5, pady=5)
+
+ttk.Label(settings_frame, text="Minimal depression depth (m):").grid(row=12, column=0, sticky="w", padx=5, pady=5)
+dep_depth_entry = ttk.Entry(settings_frame)
+dep_depth_entry.insert(0, "0.3")
+dep_depth_entry.grid(row=12, column=1, sticky="ew", padx=5, pady=5)
+
+ttk.Label(settings_frame, text="Contour smoothing:").grid(row=13, column=0, sticky="w", padx=5, pady=5)
+contour_smooth = ttk.Entry(settings_frame)
+contour_smooth.insert(0, "6.5")
+contour_smooth.grid(row=13, column=1, sticky="ew", padx=5, pady=5)
+
 # VÝBĚR VRSTEV
 layers_frame = ttk.Labelframe(middle_container, text="Symbols to draw", padding="10")
 layers_frame.grid(row=0, column=2, sticky="nsew", padx=5)
