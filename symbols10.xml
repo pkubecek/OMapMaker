@@ -143,10 +143,10 @@
         <style facecolor="none" edgecolor="#000000" linewidth="0.55065" linestyle="solid"/>
     </symbol>
     <symbol id="sym413" type="area">
-        <style facecolor="#ffba35" edgecolor="none" linewidth="0" linestyle="solid" dotdistance="6" dotsize="2.5515" dotcolor="#3dff17" />
+        <style facecolor="#ffba35" edgecolor="none" linewidth="0" linestyle="solid" dotdistance="3.4023" dotsize="6" dotcolor="#0e990e" />
     </symbol>
     <symbol id="sym414" type="area">
-        <style facecolor="#ffba35" edgecolor="none" linewidth="0" linestyle="solid" hatchcolor="#3dff17" hatchdistance="3.615" hatchwidth="0.85065" hatchstyle="(0, (5.52885, 2.5518))" />
+        <style facecolor="#ffba35" edgecolor="none" linewidth="0" linestyle="solid" hatchcolor="#0e990e" hatchdistance="3.615" hatchwidth="0.85065" hatchstyle="(0, (5.52885, 2.5518))" />
     </symbol>
     <symbol id="sym416p" type="area">
         <style facecolor="none" edgecolor="#0e990e" linewidth="0.59535" linestyle="(0, (1.27575, 0.8505))" />
