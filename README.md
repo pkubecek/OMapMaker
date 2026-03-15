@@ -4,9 +4,9 @@
 
 1) Stáhněte nejnovější release a soubory symbols15.xml a symbols10.xml. XML soubory vložte do **stejné složky** jako .ewe soubor.
 
-2) Potom stačí spustit skript a vybrat DMR a DMP, která máte stažená nebo vyberte oblast pomocí tlačítka.
+2) Potom stačí spustit EXE soubor a vybrat DMR a DMP, která máte stažená nebo vyberte oblast pomocí tlačítka.
 
-3) Defaultně jsou pak stažena a použita data z OSM.
+3) Po spuštění "Generate Map" jsou defaultně jsou pak stažena a použita data z OSM.
 
 4) Další nastavení (záložky nahoře):
    - Výška vegetace
@@ -17,7 +17,7 @@
    - Výška kupek, houbka prohlubní, zhlazení vrstevnic
    - možnost vykreslení jen něktarých skupin symbolů
   
-## ** Import mapy do OpenOrienteeringMapperu:**
+### Import mapy do OpenOrienteeringMapperu:
 Pokud chcete dostat mapu do do OMM jako jednotlivé vrstvy, je nutné, při generování mapy, zakliknout "Export layers for OOM". Vyexportovaný soubor s příponou .gpkg najdete ve stejné složce jako PNG s mapou. Přes Import v OOM pak stačí nahrát soubor a vybrat CRT soubor OMapMaker-OpenOrienteeringMapper.crt. Mapa by se měla vykreslitsprávnými znaky.
    
 
