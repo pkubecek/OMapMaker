@@ -8,7 +8,7 @@
 
 3) Defaultně jsou pak stažena a použita data z OSM.
 
-4) Další nastavení:
+4) Další nastavení (záložky nahoře):
    - Výška vegetace
    - měřítko (pokud je zvolen extent, použije se 1 : 10 000, které nemusíí odpovídat)
    - Formát papíru
