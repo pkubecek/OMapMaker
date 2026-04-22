@@ -1,14 +1,16 @@
 # **OMapMaker**
 
-## Spuštění skriptu
+## Stažení a spuštění
 
-1) Stáhněte nejnovější release a soubory symbols15.xml a symbols10.xml. XML soubory vložte do **stejné složky** jako .ewe soubor.
+1) Stáhněte instalační soubor z nejnovějšího release.
 
-2) Potom stačí spustit EXE soubor a vybrat DMR a DMP, která máte stažená nebo vyberte oblast pomocí tlačítka.
+2) instalujte
 
-3) Po spuštění "Generate Map" jsou defaultně jsou pak stažena a použita data z OSM.
+3) Po spuštění aplikace vložte DMR a DMP, nebo vyberte oblast, kterou chcete stáhnout přes tlačítko Download data from ČÚZK. Stažená data se automaticky vloží a stačí spustit generování.
 
-4) Další nastavení (záložky nahoře):
+4) Po spuštění "Generate Map" jsou defaultně jsou pak stažena a použita data z OSM.
+
+5) Další nastavení (záložky nahoře):
    - Výška vegetace
    - měřítko (pokud je zvolen extent, použije se 1 : 10 000, které nemusíí odpovídat)
    - Formát papíru
