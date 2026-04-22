@@ -33,7 +33,7 @@ Po stažení stačí nahrát do QGIS a exportovat do SHP tímto skriptem:
 
 Po spuštění skriptu stačí nahrát všechny SHP a skript si je přebere. 
 
-<img width="9353" height="3591" alt="Kost" src="https://github.com/user-attachments/assets/7a7d9acb-22f1-4f5b-9b77-84985e5dec14" />
+<img width="9353" height="7015" alt="Kost" src="https://github.com/user-attachments/assets/7a7d9acb-22f1-4f5b-9b77-84985e5dec14" />
 Ukázky vytvořené z OSM dat tady: [https://pkubecek.github.io/MapAnt.cz/]
 
 ### **Errors:**
