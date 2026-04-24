@@ -267,6 +267,9 @@ def load_dmr_grid(dmr_path, target_crs_code, pixel_size=0.5, sigma_smooth=6.5):
 
     points = np.vstack((x, y)).T
 
+    valid = np.isfinite(points).all(axis=1) & np.isfinite(z)
+    points = points[valid]
+    z = z[valid]
     shift_x = np.mean(points[:, 0])
     shift_y = np.mean(points[:, 1])
     points_shifted = points - np.array([shift_x, shift_y])
@@ -348,9 +351,12 @@ def load_dmp_grid(dmp_path, grid_x, grid_y, extent, target_crs_code):
         print("Interpolating DSM...")
         status_label.config(text="Interpolating DSM...")
         root.update_idletasks()
-
+        valid = np.isfinite(points).all(axis=1) & np.isfinite(z)
+        points = points[valid]
+        z = z[valid]
         shift_x = np.mean(points[:, 0])
         shift_y = np.mean(points[:, 1])
+        points = points[~np.isnan(points).any(axis=1)]
         points_shifted = points - np.array([shift_x, shift_y])
         grid_x_shifted = grid_x - shift_x
         grid_y_shifted = grid_y - shift_y
@@ -385,6 +391,9 @@ def load_dmp_grid(dmp_path, grid_x, grid_y, extent, target_crs_code):
                 x, y = np.array(xs), np.array(ys)
 
             points = np.vstack((x, y)).T
+            valid = np.isfinite(points).all(axis=1) & np.isfinite(z)
+            points = points[valid]
+            z = z[valid]
             shift_x = np.mean(points[:, 0])
             shift_y = np.mean(points[:, 1])
             points_shifted = points - np.array([shift_x, shift_y])
@@ -2771,7 +2780,8 @@ def run_main_analysis():
         status_label.config(text="Creating clip mask...")
         root.update_idletasks()
         try:
-            clip_polygon = MultiPoint(dmr_points).convex_hull
+            safe_points = dmr_points[np.isfinite(dmr_points).all(axis=1)]
+            clip_polygon = MultiPoint(safe_points).convex_hull
             if not clip_polygon.is_valid:
                 clip_polygon = clip_polygon.buffer(0)
             print("  -> Clip mask created.")
@@ -3204,6 +3214,7 @@ def run_main_analysis():
         messagebox.showerror("Error", str(e))
         status_label.config(text=f" Error: {str(e)}", foreground="red")
         progress_bar["value"] = 0
+        raise e
 
 
 # GUI
