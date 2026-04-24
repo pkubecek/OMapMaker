@@ -7,6 +7,7 @@
 2) instalujte
 
 3) Po spuštění aplikace vložte DMR a DMP, nebo vyberte oblast, kterou chcete stáhnout přes tlačítko Download data from ČÚZK. Stažená data se automaticky vloží a stačí spustit generování.
+   (Při stahování dat DMP OK přes ATOM někdy dichází k chybě na straně ČÚZK, kterou nejde ovlivnit)
 
 4) Po spuštění "Generate Map" jsou defaultně jsou pak stažena a použita data z OSM.
 
