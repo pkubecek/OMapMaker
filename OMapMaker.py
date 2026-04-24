@@ -1,7 +1,10 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import tkintermapview
 import xml.etree.ElementTree as ET
+import pysheds
 from pysheds.grid import Grid as PyshedsGrid
+from rasterio.transform import from_bounds
 import tempfile
 from svgpath2mpl import parse_path
 from ast import literal_eval
@@ -22,7 +25,7 @@ from matplotlib.patches import PathPatch, Polygon as MplPolygon
 import geopandas as gpd
 from shapely.geometry import (LineString, MultiLineString, Polygon, MultiPolygon,
                                box, shape, Point, MultiPoint)
-from shapely.ops import unary_union
+from shapely.ops import unary_union 
 from shapely import affinity
 import fiona
 import osmnx as ox
@@ -467,7 +470,7 @@ def add_contour_lines(ax, grid_x, grid_y, dmr_grid_unclipped, clip_polygon=None)
  
     curvature_threshold = np.percentile(curvature[safe_mask], 30)
     curvature_mask = (curvature > curvature_threshold) & safe_mask
-    gentle_slope_mask = (slope < np.percentile(slope[safe_mask], 40)) & safe_mask
+    gentle_slope_mask = (slope < np.percentile(slope[safe_mask], 30)) & safe_mask
     combined_mask = curvature_mask & gentle_slope_mask
     dilated_mask = binary_dilation(combined_mask, iterations=2)
     dmr_grid_minor = np.where(dilated_mask, dmr_grid_plot, np.nan)
@@ -591,9 +594,6 @@ def add_depressions(ax, grid_x, grid_y, dmr_grid, pixel_size=0.5, min_diameter=2
 
     #FILL SINKS
     try:
-        from pysheds.grid import Grid as PyshedsGrid
-        import tempfile
-        from rasterio.transform import from_bounds
 
         min_x, max_x = grid_x.min(), grid_x.max()
         min_y, max_y = grid_y.min(), grid_y.max()
@@ -1036,7 +1036,7 @@ def vectorize_vegetation(classified_raster_raw, class_names, transform, dmr_path
         print("  -> Disolving polygons...")
         gdf.geometry = gdf.geometry.simplify(0.5, preserve_topology=True)
         dissolved_gdf = gdf.dissolve(by='class_name', aggfunc='first').reset_index()
-        gdf.geometry = gdf.geometry.buffer(0.7).buffer(0)
+        gdf.geometry = gdf.geometry.buffer(0.8).buffer(0)
         dissolved_gdf = gpd.GeoDataFrame(dissolved_gdf, geometry='geometry', crs=original_crs)
 
         if save_gpkg:
@@ -1424,13 +1424,15 @@ def add_vector_layers(ax, gdf, extent, zabaged_gdfs, dmr_grid_linear_viz_feature
         else:
             plot_masked(sym_key="sym213", zorder=15, mask=(natural.isin(["sand", "dune"])), gdf=gdf_polygons, ax=ax)
 
-        # 214 - Skalní podloží
+        # 214 - Holá skála
+        '''
         cgdf = isom_gdfs.get("214")
         if cgdf is not None:
             plot_masked(sym_key="sym214", zorder=17, mask=None, gdf=cgdf, ax=ax, to_mask=False)
         else:
             plot_masked(sym_key="sym214", zorder=17, mask=(natural == "bare_rock"), gdf=gdf_polygons, ax=ax)
-
+        '''
+            
         # 215 - Příkop
         mask_ditch = (barrier == "ditch") | (military == "trench")
         cgdf = isom_gdfs.get("215")
@@ -2207,7 +2209,6 @@ def _get_download_url_from_subfeed(sub_feed_url):
 
 
 def open_cuzk_downloader(parent, on_complete_callback):
-    import tkintermapview
 
     dlg = tk.Toplevel(parent)
     dlg.title("ATOM download")
@@ -2241,7 +2242,7 @@ def open_cuzk_downloader(parent, on_complete_callback):
     # Toolbar
     top = ttk.Frame(left)
     top.grid(row=0, column=0, sticky="ew", pady=(0, 4))
-    ttk.Label(top, text="Režim:", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
+    ttk.Label(top, text="Mode:", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
 
     mode_var = tk.StringVar(value="pan")
 
@@ -2285,15 +2286,13 @@ def open_cuzk_downloader(parent, on_complete_callback):
                command=lambda: _pick_dir()).grid(row=0, column=1, padx=(4, 0))
 
     # DSM 
-    dmp_frame = ttk.Labelframe(right, text="DMP:", padding=6)
+    dmp_frame = ttk.Labelframe(right, text="DSM:", padding=6)
     dmp_frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
     dmp_var = tk.StringVar(value="DMP1G")
     ttk.Radiobutton(dmp_frame, text="DMP 1G",
                     variable=dmp_var, value="DMP1G").pack(anchor="w")
     ttk.Radiobutton(dmp_frame, text="DMP OK (recomended)",
                     variable=dmp_var, value="DMPOK").pack(anchor="w")
-    ttk.Label(dmp_frame, text="DMP OK (Does not cover all Czehia)",
-              foreground="gray", font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
 
     # Progress + Button
     af = ttk.Frame(right, padding=(0, 4))
@@ -2303,7 +2302,7 @@ def open_cuzk_downloader(parent, on_complete_callback):
     prog.grid(row=0, column=0, sticky="ew", pady=(0, 4))
     prog_lbl = ttk.Label(af, text="", font=("Segoe UI", 8))
     prog_lbl.grid(row=1, column=0, sticky="w")
-    dl_btn = ttk.Button(af, text="Stahovat", command=lambda: _start_download(), state="disabled")
+    dl_btn = ttk.Button(af, text="Download", command=lambda: _start_download(), state="disabled")
     dl_btn.grid(row=2, column=0, sticky="ew", pady=(8, 0), ipady=4)
 
     # Helpers
@@ -2500,7 +2499,7 @@ def open_cuzk_downloader(parent, on_complete_callback):
                 with laspy.open(input_paths[0]) as fh_tmp:
                     try:
                         src_crs = fh_tmp.header.parse_crs()
-                        if src_crs is None:
+                        if src_crs is None: 
                             raise ValueError("No CRS")
                     except Exception:
                         src_crs = CRS.from_epsg(5514)
@@ -2597,13 +2596,12 @@ def open_cuzk_downloader(parent, on_complete_callback):
             def _ask():
                 answer[0] = messagebox.askyesno(
                     "No DMP OK tiles found",
-                    "DMP OK does not cover all Czechia.\n\nDo you want to download DMP 1G instead?",
                     parent=dlg)
                 ev.set()
             dlg.after(0, _ask)
             ev.wait()
             if answer[0]:
-                dmp_label       = "DMP 1G (fallback)"
+                dmp_label = "DMP 1G (fallback)"
                 dmp_merged_name = "DMP1G_merged.laz"
                 _set_prog(6, "Loading ATOM DMP 1G (fallback)...")
                 if S.get("atom_dmp") is None:
@@ -2653,7 +2651,7 @@ def open_cuzk_downloader(parent, on_complete_callback):
         for tid, su in dmp_t:
             pct = done[0] - len(dmr_t)
             _set_prog(45 + int(35 * pct / max(1, len(dmp_t))),
-                      f"{dmp_label} {pct+1}/{len(dmp_t)}: stahuji...")
+                      f"{dmp_label} {pct+1}/{len(dmp_t)}: downloading...")
             _dl_tile(tid, su, dmp_raw_dir, dmp_files)
             done[0] += 1
 
@@ -2841,7 +2839,7 @@ def run_main_analysis():
                         else:
                             print(f"  -> '{filename}' is empty.")
                 except Exception as e:
-                    print(f" Error whiile loading {filename}: {e}")
+                    print(f" Error while loading {filename}: {e}")
 
         # OSM data
         print("Downloading OSM data...")
@@ -2849,6 +2847,8 @@ def run_main_analysis():
         try:
             ox.settings.log_console = True
             ox.settings.use_cache = True
+            ox.settings.cache_folder = os.path.join(tempfile.gettempdir(), "OMapMaker_OSM_cache")
+            os.makedirs(ox.settings.cache_folder, exist_ok=True)
             ox.settings.user_agent = "OMapMaker-App-v7"
             ox.settings.timeout = 300
         except Exception as e:
@@ -3453,3 +3453,4 @@ status_label.pack(fill=tk.X)
 
 root.mainloop()
 print("--- OMapMaker: GUI was closed ---")
+
