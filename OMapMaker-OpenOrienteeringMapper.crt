@@ -282,6 +282,7 @@
 501       isom_501_poly
 501       isom_501_point
 502       isom_502
+502       isom_502D
 503       isom_503
 504       isom_504
 505       isom_505
@@ -309,8 +310,8 @@
 523       isom_523_line
 523       isom_523_poly
 523       isom_523_point
-524	  isom_524
+524	      isom_524
 525       isom_525
-526	  isom_526
+526	      isom_526
 531       isom_531
-532	  isom_532
+532	      isom_532
