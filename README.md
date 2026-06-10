@@ -1,5 +1,5 @@
 # **OMapMaker**
-##Webová aplikace / Web app: [https://omapmaker.vercel.app/]([url](https://omapmaker.vercel.app/))
+## Webová aplikace / Web app: [https://omapmaker.vercel.app/]([url](https://omapmaker.vercel.app/))
 ## Stažení a spuštění
 
 1) Stáhněte instalační soubor z nejnovějšího release.
