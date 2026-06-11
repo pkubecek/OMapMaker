@@ -1,5 +1,5 @@
 # **OMapMaker**
-## Webová aplikace / Web app: 
+## Webová aplikace / Web app (Beta): 
 [https://omapmaker.vercel.app/](https://omapmaker.vercel.app/)
 ## Stažení a spuštění
 
